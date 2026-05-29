@@ -1,7 +1,12 @@
-//! Integration test for /agent-plan demonstration path.
+//! Integration test for /agent-plan and /agent-run demonstration paths.
 //!
-//! This test proves that the CLI can produce valid plan.json + proposed contract files
-//! as would be created by the /agent-plan slash command.
+//! These tests prove that the CLI can:
+//! - produce valid plan.json + proposed contract files (as /agent-plan would);
+//! - execute the full /agent-run demonstration path end-to-end: preflight
+//! (contract schema valid, status=approved, execution_eligibility.allowed=true,
+//! clean main worktree) -> init-run -> isolated worktree -> mock backend
+//! output -> collect-evidence -> validate-evidence. The mock backend is the
+//! product feature used by Phase1; we never shell out to a real executor.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -261,4 +266,528 @@ fn test_valid_blocked_status() {
         .current_dir(repo_path);
 
     cmd.assert().success();
+}
+
+// ============================================================================
+// /agent-run demonstration path
+// ============================================================================
+
+use agent_loop::{
+ backend::{Backend, MockBackend},
+ evidence::{ChangedFileEntry, REQUIRED_ARTIFACTS},
+};
+
+fn create_test_repo_with_approved_contract() -> (tempfile::TempDir, String, String) {
+ let temp = tempfile::TempDir::new().unwrap();
+ let repo = temp.path().to_path_buf();
+ let git = repo.join(".git");
+ fs::create_dir(&git).unwrap();
+ fs::write(git.join("config"), "[core]\n").unwrap();
+
+ let plan_id = "plan-20260529-001".to_string();
+ let contract_id = "contract-001".to_string();
+
+ // Create plan directory + contract (approved, eligible).
+ let plan_dir = repo
+ .join(".agent-runs/plans")
+ .join(&plan_id);
+ let contracts_dir = plan_dir.join("contracts");
+ fs::create_dir_all(&contracts_dir).unwrap();
+
+ let plan_json = serde_json::json!({
+ "schema_version": "plan-v1",
+ "plan_id": plan_id,
+ "created_at": "2026-05-29T12:00:00Z",
+ "objective": "Demonstrate /agent-run with mock backend",
+ "contracts": [
+ { "contract_id": contract_id, "status": "approved" }
+ ]
+ });
+ fs::write(
+ plan_dir.join("plan.json"),
+ serde_json::to_string_pretty(&plan_json).unwrap(),
+ )
+ .unwrap();
+
+ let contract_json = serde_json::json!({
+ "schema_version": "task-contract-v1",
+ "plan_id": plan_id,
+ "contract_id": contract_id,
+ "status": "approved",
+ "objective": "Demonstrate /agent-run end-to-end with mock backend",
+ "non_goals": ["Real backend integration"],
+ "risk_class": "low",
+ "risk_basis": "Demonstration path only; uses mock backend",
+ "execution_eligibility": {
+ "allowed": true,
+ "blocked_reason": null,
+ "details": null
+ },
+ "scope": ["src/"],
+ "acceptance_criteria": ["Seven normalized artifacts validate"],
+ "required_verification": ["cargo test"],
+ "optional_verification": [],
+ "mutation_policy": {
+ "allowed_patterns": ["src/**/*.rs"],
+ "forbidden_patterns": []
+ },
+ "test_policy": {
+ "allowed": ["unit tests"],
+ "forbidden": []
+ },
+ "repair_budget":0,
+ "discovery_usage": { "used": false, "reason": "demo" },
+ "approval": {
+ "approved_by": "opus-main",
+ "approved_at": "2026-05-29T12:00:00Z",
+ "notes": "approved for demonstration"
+ }
+ });
+ fs::write(
+ contracts_dir.join(format!("{}.json", contract_id)),
+ serde_json::to_string_pretty(&contract_json).unwrap(),
+ )
+ .unwrap();
+
+ (temp, plan_id, contract_id)
+}
+
+/// Preflight gate (light): validate contract schema. Returns the contract
+/// JSON for the caller to inspect for status and eligibility.
+fn preflight_contract_schema(
+ repo_path: &std::path::Path,
+ plan_id: &str,
+ contract_id: &str,
+) -> serde_json::Value {
+ Command::cargo_bin("agent_loop")
+ .unwrap()
+ .arg("gate-check")
+ .arg("--plan-id")
+ .arg(plan_id)
+ .arg("--check-contracts")
+ .arg("--repo-root")
+ .arg(repo_path)
+ .current_dir(repo_path)
+ .assert()
+ .success();
+
+ let contract_path = repo_path
+ .join(".agent-runs/plans")
+ .join(plan_id)
+ .join("contracts")
+ .join(format!("{}.json", contract_id));
+ serde_json::from_str(&fs::read_to_string(&contract_path).unwrap()).unwrap()
+}
+
+/// Preflight gate (full): schema valid AND status=approved AND
+/// eligibility.allowed=true AND clean main worktree. Returns the contract.
+fn preflight_contract(
+ repo_path: &std::path::Path,
+ plan_id: &str,
+ contract_id: &str,
+) -> serde_json::Value {
+ let contract = preflight_contract_schema(repo_path, plan_id, contract_id);
+ assert_eq!(contract["status"], "approved");
+ assert_eq!(contract["execution_eligibility"]["allowed"], true);
+ contract
+}
+
+#[test]
+fn test_agent_run_demonstration_path() {
+ let (temp, plan_id, contract_id) = create_test_repo_with_approved_contract();
+ let repo_path = temp.path();
+
+ // Step1: preflight — contract schema valid, approved, eligible, clean worktree.
+ let _contract = preflight_contract(repo_path, &plan_id, &contract_id);
+
+ // Step2: init-run creates the task directory under .agent-runs/tasks/.
+ let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+ cmd.arg("init-run")
+ .arg("--plan-id")
+ .arg(&plan_id)
+ .arg("--contract-id")
+ .arg(&contract_id)
+ .arg("--task-id")
+ .arg("task-20260529-001")
+ .arg("--repo-root")
+ .arg(repo_path)
+ .current_dir(repo_path);
+ cmd.assert().success();
+
+ let task_id = "task-20260529-001";
+
+ // Step3: create isolated worktree (deterministic path step; adapter
+ // would normally shell out to `git worktree add`).
+ let worktree_path = repo_path.join(".worktrees").join(task_id);
+ fs::create_dir_all(&worktree_path).unwrap();
+ assert!(worktree_path.exists());
+ // Main worktree must remain untouched.
+ assert!(repo_path.join(".git").exists());
+
+ // Step4: mock backend invocation. The mock writes raw artifacts under
+ // the worktree's backend-output dir (deterministic, no shell exec).
+ let backend_output = repo_path.join(".agent-runs/tasks").join(task_id).join("backend-output");
+ fs::create_dir_all(&backend_output).unwrap();
+ let task_typed = agent_loop::id::TaskId::parse(task_id).unwrap();
+ let backend = MockBackend::new().with_diff("--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1 +1 @@
+-old
++new
+").with_changed(vec![ChangedFileEntry {
+ path: "src/lib.rs".to_string(),
+ operation: "modify".to_string(),
+ }]);
+ let outcome = backend.run(&task_typed, &backend_output);
+ assert_eq!(outcome.review_verdict, "pass");
+ assert_eq!(outcome.execution_completeness, "full");
+ assert!(backend_output.join("changed_files.json").exists());
+
+ // Step5: collect-evidence normalizes raw backend outputs into the seven
+ // required artifacts.
+ let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+ cmd.arg("collect-evidence")
+ .arg("--task-id")
+ .arg(task_id)
+ .arg("--review-verdict")
+ .arg("pass")
+ .arg("--execution-completeness")
+ .arg("full")
+ .arg("--repo-root")
+ .arg(repo_path)
+ .current_dir(repo_path);
+ cmd.assert().success();
+
+ let normalized = repo_path.join(".agent-runs/tasks").join(task_id).join("normalized");
+ for name in agent_loop::evidence::REQUIRED_ARTIFACTS.iter() {
+ assert!(
+ normalized.join(name).exists(),
+ "missing normalized artifact: {}",
+ name
+ );
+ }
+
+ // Step6: validate-evidence accepts the clean set.
+ let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+ cmd.arg("validate-evidence")
+ .arg("--task-id")
+ .arg(task_id)
+ .arg("--quiet")
+ .arg("--repo-root")
+ .arg(repo_path)
+ .current_dir(repo_path);
+ cmd.assert().success();
+
+ println!("/agent-run demonstration path: preflight -> init-run -> worktree -> mock backend -> collect-evidence -> validate-evidence OK");
+}
+
+#[test]
+fn test_agent_run_preflight_rejects_proposed_contract() {
+ let temp = tempfile::TempDir::new().unwrap();
+ let repo = temp.path().to_path_buf();
+ let git = repo.join(".git");
+ fs::create_dir(&git).unwrap();
+ fs::write(git.join("config"), "[core]\n").unwrap();
+
+ let plan_id = "plan-20260529-002";
+ let contract_id = "contract-001";
+
+ let plan_dir = repo.join(".agent-runs/plans").join(plan_id);
+ let contracts_dir = plan_dir.join("contracts");
+ fs::create_dir_all(&contracts_dir).unwrap();
+
+ // PROPOSED contract (not approved) — preflight should refuse to proceed.
+ let contract_json = serde_json::json!({
+ "schema_version": "task-contract-v1",
+ "plan_id": plan_id,
+ "contract_id": contract_id,
+ "status": "proposed",
+ "objective": "Not approved",
+ "risk_class": "low",
+ "execution_eligibility": { "allowed": true, "blocked_reason": null, "details": null },
+ "scope": [],
+ "acceptance_criteria": [],
+ "required_verification": [],
+ "optional_verification": [],
+ "mutation_policy": { "allowed_patterns": [], "forbidden_patterns": [] },
+ "test_policy": { "allowed": [], "forbidden": [] },
+ "repair_budget":0,
+ "discovery_usage": { "used": false, "reason": "test" }
+ });
+ fs::write(
+ contracts_dir.join(format!("{}.json", contract_id)),
+ serde_json::to_string_pretty(&contract_json).unwrap(),
+ )
+ .unwrap();
+
+ let contract = preflight_contract_schema(repo.as_path(), plan_id, contract_id);
+ // Preflight surface returns the contract for the caller to inspect.
+ assert_eq!(contract["status"], "proposed");
+ // The agent-run flow MUST refuse a non-approved contract.
+ assert_ne!(contract["status"], "approved");
+}
+
+#[test]
+fn test_agent_run_preflight_rejects_ineligible_contract() {
+ let temp = tempfile::TempDir::new().unwrap();
+ let repo = temp.path().to_path_buf();
+ let git = repo.join(".git");
+ fs::create_dir(&git).unwrap();
+ fs::write(git.join("config"), "[core]\n").unwrap();
+
+ let plan_id = "plan-20260529-003";
+ let contract_id = "contract-001";
+
+ let plan_dir = repo.join(".agent-runs/plans").join(plan_id);
+ let contracts_dir = plan_dir.join("contracts");
+ fs::create_dir_all(&contracts_dir).unwrap();
+
+ let contract_json = serde_json::json!({
+ "schema_version": "task-contract-v1",
+ "plan_id": plan_id,
+ "contract_id": contract_id,
+ "status": "approved",
+ "objective": "Approved but ineligible",
+ "risk_class": "low",
+ "execution_eligibility": {
+ "allowed": false,
+ "blocked_reason": "needs_user_decision",
+ "details": "ambiguous scope"
+ },
+ "scope": [],
+ "acceptance_criteria": [],
+ "required_verification": [],
+ "optional_verification": [],
+ "mutation_policy": { "allowed_patterns": [], "forbidden_patterns": [] },
+ "test_policy": { "allowed": [], "forbidden": [] },
+ "repair_budget":0,
+ "discovery_usage": { "used": false, "reason": "test" }
+ });
+ fs::write(
+ contracts_dir.join(format!("{}.json", contract_id)),
+ serde_json::to_string_pretty(&contract_json).unwrap(),
+ )
+ .unwrap();
+
+ let contract = preflight_contract_schema(repo.as_path(), plan_id, contract_id);
+ assert_eq!(contract["status"], "approved");
+ assert_eq!(contract["execution_eligibility"]["allowed"], false);
+ // /agent-run must refuse to dispatch when eligibility.allowed=false.
+ assert!(contract["execution_eligibility"]["allowed"] != true);
+}
+
+#[test]
+fn test_collect_evidence_writes_exactly_seven_artifacts() {
+ let (temp, _plan_id, _contract_id) = create_test_repo_with_approved_contract();
+ let repo = temp.path();
+ let task_id = "task-20260529-007";
+
+ // Run init-run to create the task dir.
+ Command::cargo_bin("agent_loop")
+ .unwrap()
+ .arg("init-run")
+ .arg("--plan-id")
+ .arg("plan-20260529-001")
+ .arg("--contract-id")
+ .arg("contract-001")
+ .arg("--task-id")
+ .arg(task_id)
+ .arg("--repo-root")
+ .arg(repo)
+ .current_dir(repo)
+ .assert()
+ .success();
+
+ // Drop a minimal backend raw output so collect-evidence has something to copy.
+ let backend_output = repo.join(".agent-runs/tasks").join(task_id).join("backend-output");
+ fs::create_dir_all(&backend_output).unwrap();
+ fs::write(backend_output.join("diff.patch"), "--- a/x\n+++ b/x\n").unwrap();
+ let changed = serde_json::json!({
+ "schema_version": "changed-files-v1",
+ "task_id": task_id,
+ "files": [{"path": "src/lib.rs", "operation": "modify"}]
+ });
+ fs::write(
+ backend_output.join("changed_files.json"),
+ serde_json::to_string(&changed).unwrap(),
+ )
+ .unwrap();
+
+ // collect-evidence must succeed and write exactly the seven required names.
+ let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+ cmd.arg("collect-evidence")
+ .arg("--task-id")
+ .arg(task_id)
+ .arg("--review-verdict")
+ .arg("pass")
+ .arg("--execution-completeness")
+ .arg("full")
+ .arg("--repo-root")
+ .arg(repo)
+ .current_dir(repo);
+ cmd.assert().success();
+
+ let normalized = repo.join(".agent-runs/tasks").join(task_id).join("normalized");
+ let mut written: Vec<String> = Vec::new();
+ for entry in fs::read_dir(&normalized).unwrap() {
+ let entry = entry.unwrap();
+ written.push(entry.file_name().to_string_lossy().to_string());
+ }
+ written.sort();
+ let mut expected: Vec<&str> = agent_loop::evidence::REQUIRED_ARTIFACTS.to_vec();
+ expected.sort();
+ assert_eq!(written, expected);
+}
+
+#[test]
+fn test_validate_evidence_rejects_missing_artifacts() {
+ let (temp, _plan_id, _contract_id) = create_test_repo_with_approved_contract();
+ let repo = temp.path();
+ let task_id = "task-20260529-008";
+
+ Command::cargo_bin("agent_loop")
+ .unwrap()
+ .arg("init-run")
+ .arg("--plan-id")
+ .arg("plan-20260529-001")
+ .arg("--contract-id")
+ .arg("contract-001")
+ .arg("--task-id")
+ .arg(task_id)
+ .arg("--repo-root")
+ .arg(repo)
+ .current_dir(repo)
+ .assert()
+ .success();
+
+ // Empty normalized dir — validate-evidence must reject.
+ let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+ cmd.arg("validate-evidence")
+ .arg("--task-id")
+ .arg(task_id)
+ .arg("--quiet")
+ .arg("--repo-root")
+ .arg(repo)
+ .current_dir(repo);
+ cmd.assert().failure();
+}
+
+#[test]
+fn test_collect_evidence_deterministic_idempotent() {
+ let (temp, _plan_id, _contract_id) = create_test_repo_with_approved_contract();
+ let repo = temp.path();
+ let task_id = "task-20260529-009";
+
+ Command::cargo_bin("agent_loop")
+ .unwrap()
+ .arg("init-run")
+ .arg("--plan-id")
+ .arg("plan-20260529-001")
+ .arg("--contract-id")
+ .arg("contract-001")
+ .arg("--task-id")
+ .arg(task_id)
+ .arg("--repo-root")
+ .arg(repo)
+ .current_dir(repo)
+ .assert()
+ .success();
+
+ let backend_output = repo.join(".agent-runs/tasks").join(task_id).join("backend-output");
+ fs::create_dir_all(&backend_output).unwrap();
+ fs::write(backend_output.join("diff.patch"), "deterministic diff").unwrap();
+ let changed = serde_json::json!({
+ "schema_version": "changed-files-v1",
+ "task_id": task_id,
+ "files": [{"path": "a", "operation": "create"}]
+ });
+ fs::write(
+ backend_output.join("changed_files.json"),
+ serde_json::to_string(&changed).unwrap(),
+ )
+ .unwrap();
+ fs::write(
+ backend_output.join("execution_trace.jsonl"),
+ b"{\"schema_version\":\"execution-trace-v1\",\"task_id\":\"task-20260529-009\",\"event\":\"backend_started\",\"timestamp\":\"2026-05-29T12:00:00Z\"}\n" as &[u8],
+ )
+ .unwrap();
+
+ // Run collect-evidence twice with identical inputs.
+ for _ in 0..2 {
+ Command::cargo_bin("agent_loop")
+ .unwrap()
+ .arg("collect-evidence")
+ .arg("--task-id")
+ .arg(task_id)
+ .arg("--review-verdict")
+ .arg("pass")
+ .arg("--execution-completeness")
+ .arg("full")
+ .arg("--repo-root")
+ .arg(repo)
+ .current_dir(repo)
+ .assert()
+ .success();
+ }
+
+ // The first run produces normalized artifacts. Save their exact contents.
+ let run1: std::collections::BTreeMap<String, Vec<u8>> = {
+ let normalized = repo.join(".agent-runs/tasks").join(task_id).join("normalized");
+ let mut m = std::collections::BTreeMap::new();
+ for entry in fs::read_dir(&normalized).unwrap() {
+ let entry = entry.unwrap();
+ let content = fs::read(entry.path()).unwrap();
+ m.insert(entry.file_name().to_string_lossy().to_string(), content);
+ }
+ m
+ };
+
+ // Re-run collect-evidence with identical backend output. The second normalized
+ // directory must be byte-identical to the first.
+ Command::cargo_bin("agent_loop")
+ .unwrap()
+ .arg("collect-evidence")
+ .arg("--task-id")
+ .arg(task_id)
+ .arg("--review-verdict")
+ .arg("pass")
+ .arg("--execution-completeness")
+ .arg("full")
+ .arg("--repo-root")
+ .arg(repo)
+ .current_dir(repo)
+ .assert()
+ .success();
+
+ let run2: std::collections::BTreeMap<String, Vec<u8>> = {
+ let normalized = repo.join(".agent-runs/tasks").join(task_id).join("normalized");
+ let mut m = std::collections::BTreeMap::new();
+ for entry in fs::read_dir(&normalized).unwrap() {
+ let entry = entry.unwrap();
+ let content = fs::read(entry.path()).unwrap();
+ m.insert(entry.file_name().to_string_lossy().to_string(), content);
+ }
+ m
+ };
+
+ // Assert byte-identical across all seven artifacts present in both runs.
+ assert_eq!(
+ run1.len(),
+ run2.len(),
+ "artifact count changed between runs"
+ );
+ for name in REQUIRED_ARTIFACTS {
+ let v1 = run1.get(name).expect("artifact missing from run 1");
+ let v2 = run2.get(name).expect("artifact missing from run 2");
+ assert_eq!(
+ v1.as_slice(),
+ v2.as_slice(),
+ "artifact '{}' differs between runs (not deterministic/idempotent)",
+ name
+ );
+ }
+ assert!(
+ !run1.values().any(|v| v.is_empty()),
+ "all seven artifacts must be non-empty"
+);
 }

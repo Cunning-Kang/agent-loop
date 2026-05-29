@@ -667,3 +667,431 @@ mod tests {
         assert!(cmd.run().is_err());
     }
 }
+// ============================================================================
+// collect-evidence command
+// ============================================================================
+
+/// Normalize backend raw outputs into the seven required artifacts.
+///
+/// The CLI is deterministic: it copies/transforms inputs from
+/// `backend_output_dir` into `normalized_dir`. It does NOT evaluate
+/// correctness, infer missing verification success, or fabricate absent
+/// evidence. Backend raw outputs are preserved under `backend-output/`.
+pub struct CollectEvidence {
+ pub repo_root: PathBuf,
+ pub task_id: String,
+ pub backend_output_dir: Option<PathBuf>,
+ pub normalized_dir: Option<PathBuf>,
+ pub review_verdict: String,
+ pub execution_completeness: String,
+}
+
+impl CollectEvidence {
+ pub fn run(&self) -> CommandResult {
+ let repo_root = find_repo_root(&self.repo_root)
+ .ok_or_else(|| CommandError::NotFound("Not inside a git repository".to_string()))?;
+
+ // Validate task_id format (no semantic judgment; just structural).
+ TaskId::parse(&self.task_id).ok_or_else(|| {
+ CommandError::IdValidation(format!("Invalid task_id format: {}", self.task_id))
+ })?;
+
+ // Validate review_verdict enum.
+ match self.review_verdict.as_str() {
+ "pass" | "fail" | "blocked" => {}
+ other => {
+ return Err(CommandError::InvalidInput(format!(
+ "review_verdict must be one of pass|fail|blocked, got: {}",
+ other
+)));
+ }
+ }
+ match self.execution_completeness.as_str() {
+ "full" | "partial" | "unavailable" => {}
+ other => {
+ return Err(CommandError::InvalidInput(format!(
+ "execution_completeness must be one of full|partial|unavailable, got: {}",
+ other
+)));
+ }
+ }
+
+ let paths = AgentRunsPaths::new(&repo_root);
+ let backend_output_dir = self
+ .backend_output_dir
+ .clone()
+ .unwrap_or_else(|| paths.backend_output_dir(&self.task_id));
+ let normalized_dir = self
+ .normalized_dir
+ .clone()
+ .unwrap_or_else(|| paths.normalized_dir(&self.task_id));
+
+ // Read backend raw outputs if present.
+ let diff_text = read_backend_diff(&backend_output_dir);
+ let changed_files = read_backend_changed_files(&backend_output_dir)
+ .map_err(CommandError::InvalidInput)?;
+ let verification = read_backend_verification(&backend_output_dir);
+ let trace_events = read_backend_trace(&backend_output_dir);
+
+ let external_review = crate::evidence::ExternalReviewDoc {
+ schema_version: "external-review-v1".to_string(),
+ task_id: self.task_id.clone(),
+ verdict: self.review_verdict.clone(),
+ scope_compliance: None,
+ policy_compliance: None,
+ verification_sufficient: None,
+ summary: None,
+ findings: Vec::new(),
+ };
+
+ let inputs = crate::evidence::CollectEvidenceInputs {
+ task_id: &self.task_id,
+ backend_output_dir: &backend_output_dir,
+ normalized_dir: &normalized_dir,
+ diff_text: &diff_text,
+ changed_files,
+ verification,
+ external_review,
+ execution_trace_events: trace_events,
+ execution_completeness: &self.execution_completeness,
+ audit_limitations: Vec::new(),
+ };
+
+ let written = crate::evidence::collect_evidence(inputs)
+ .map_err(|e| CommandError::InvalidInput(e.to_string()))?;
+
+ for path in &written {
+ println!("{}", path.display());
+ }
+ println!(
+ "Wrote {} normalized artifact(s) for {}",
+ written.len(),
+ self.task_id
+ );
+
+ Ok(())
+ }
+}
+
+/// Read backend raw diff text if present.
+fn read_backend_diff(backend_output_dir: &Path) -> String {
+ let p = backend_output_dir.join("diff.patch");
+ std::fs::read_to_string(&p).unwrap_or_default()
+}
+
+/// Read backend raw `changed_files.json` if present.
+fn read_backend_changed_files(
+ backend_output_dir: &Path,
+) -> Result<Vec<crate::evidence::ChangedFileEntry>, String> {
+ let p = backend_output_dir.join("changed_files.json");
+ if !p.exists() {
+ return Ok(Vec::new());
+ }
+ let doc: crate::evidence::ChangedFilesDoc = read_json(&p).map_err(|e| e.to_string())?;
+ Ok(doc.files)
+}
+
+/// Read backend raw `verification.json` if present.
+fn read_backend_verification(
+ backend_output_dir: &Path,
+) -> Vec<crate::evidence::VerificationResult> {
+ let p = backend_output_dir.join("verification.json");
+ if !p.exists() {
+ return Vec::new();
+ }
+ let doc: crate::evidence::VerificationDoc = match read_json(&p) {
+ Ok(d) => d,
+ Err(_) => return Vec::new(),
+ };
+ doc.results
+}
+
+/// Read backend raw `execution_trace.jsonl` if present and convert to events.
+fn read_backend_trace(backend_output_dir: &Path) -> Vec<crate::evidence::ExecutionTraceEvent> {
+ let p = backend_output_dir.join("execution_trace.jsonl");
+ let content = match std::fs::read_to_string(&p) {
+ Ok(c) => c,
+ Err(_) => return Vec::new(),
+ };
+ let mut events: Vec<crate::evidence::ExecutionTraceEvent> = Vec::new();
+ for line in content.lines() {
+ let trimmed = line.trim();
+ if trimmed.is_empty() {
+ continue;
+ }
+ // Best-effort: only the `event` and `timestamp` fields are required;
+ // everything else is preserved as `details`.
+ let v: serde_json::Value = match serde_json::from_str(trimmed) {
+ Ok(v) => v,
+ Err(_) => continue,
+ };
+ let event = v
+ .get("event")
+ .and_then(|x| x.as_str())
+ .unwrap_or("unknown")
+ .to_string();
+ let timestamp = v
+ .get("timestamp")
+ .and_then(|x| x.as_str())
+ .unwrap_or("1970-01-01T00:00:00Z")
+ .to_string();
+ let details = v.get("details").cloned();
+ events.push(crate::evidence::ExecutionTraceEvent {
+ event,
+ timestamp,
+ details,
+ });
+ }
+ events
+}
+
+// ============================================================================
+// validate-evidence command
+// ============================================================================
+
+/// Validate normalized evidence artifacts against their JSON Schemas.
+/// Rejects invalid artifacts. No semantic judgment, no repair, no fabrication.
+pub struct ValidateEvidence {
+ pub repo_root: PathBuf,
+ pub task_id: String,
+ pub normalized_dir: Option<PathBuf>,
+ pub quiet: bool,
+}
+
+impl ValidateEvidence {
+ pub fn run(&self) -> CommandResult {
+ let repo_root = find_repo_root(&self.repo_root)
+ .ok_or_else(|| CommandError::NotFound("Not inside a git repository".to_string()))?;
+
+ TaskId::parse(&self.task_id).ok_or_else(|| {
+ CommandError::IdValidation(format!("Invalid task_id format: {}", self.task_id))
+ })?;
+
+ let paths = AgentRunsPaths::new(&repo_root);
+ let normalized_dir = self
+ .normalized_dir
+ .clone()
+ .unwrap_or_else(|| paths.normalized_dir(&self.task_id));
+
+ let report = crate::evidence::validate_evidence(&self.task_id, &normalized_dir)
+ .map_err(|e| CommandError::InvalidInput(e.to_string()))?;
+
+ if !self.quiet {
+ for art in &report.artifacts {
+ if art.valid {
+ println!("{}: valid", art.name);
+ } else {
+ println!("{}: INVALID", art.name);
+ for err in &art.errors {
+ println!(" - {}", err);
+ }
+ }
+ }
+ }
+
+ if report.valid {
+ if !self.quiet {
+ println!("Evidence valid for {}", self.task_id);
+ }
+ Ok(())
+ } else {
+ Err(CommandError::InvalidInput(format!(
+ "Evidence validation failed for {}",
+ self.task_id
+)))
+ }
+ }
+}
+
+// ============================================================================
+// collect-evidence / validate-evidence tests
+// ============================================================================
+
+#[cfg(test)]
+mod collect_validate_tests {
+ use super::*;
+ use crate::artifacts::ensure_dir;
+ use std::fs;
+ use tempfile::TempDir;
+
+ fn setup_repo() -> (TempDir, PathBuf) {
+ let temp = TempDir::new().unwrap();
+ let repo = temp.path().to_path_buf();
+ let git = repo.join(".git");
+ fs::create_dir(&git).unwrap();
+ fs::write(git.join("config"), "[core]\n").unwrap();
+ (temp, repo)
+ }
+
+ #[test]
+ fn test_collect_evidence_command_writes_seven() {
+ let (_temp, repo) = setup_repo();
+ let task_id = "task-20260529-001";
+
+ // Pre-create the backend output directory with raw artifacts.
+ let backend_output = repo.join("backend-output");
+ ensure_dir(&backend_output).unwrap();
+
+ // diff.patch
+ fs::write(backend_output.join("diff.patch"), "--- a/x\n+++ b/x\n").unwrap();
+
+ // changed_files.json
+ let changed = serde_json::json!({
+ "schema_version": "changed-files-v1",
+ "task_id": task_id,
+ "files": [{"path": "src/lib.rs", "operation": "modify"}]
+ });
+ fs::write(
+ backend_output.join("changed_files.json"),
+ serde_json::to_string(&changed).unwrap(),
+ )
+ .unwrap();
+
+ // verification.json
+ let verification = serde_json::json!({
+ "schema_version": "verification-v1",
+ "task_id": task_id,
+ "results": [{"command": "cargo test", "exit_code":0, "passed": true}]
+ });
+ fs::write(
+ backend_output.join("verification.json"),
+ serde_json::to_string(&verification).unwrap(),
+ )
+ .unwrap();
+
+ // execution_trace.jsonl
+ fs::write(
+ backend_output.join("execution_trace.jsonl"),
+ "{\"event\":\"x\",\"timestamp\":\"2026-05-29T12:00:00Z\"}\n",
+ )
+ .unwrap();
+
+ let cmd = CollectEvidence {
+ repo_root: repo.clone(),
+ task_id: task_id.to_string(),
+ backend_output_dir: Some(backend_output.clone()),
+ normalized_dir: None,
+ review_verdict: "pass".to_string(),
+ execution_completeness: "full".to_string(),
+ };
+
+ assert!(cmd.run().is_ok());
+ let paths = AgentRunsPaths::new(&repo);
+ let normalized = paths.normalized_dir(task_id);
+ for name in crate::evidence::REQUIRED_ARTIFACTS.iter() {
+ assert!(normalized.join(name).exists(), "missing {}", name);
+ }
+ }
+
+ #[test]
+ fn test_collect_evidence_command_rejects_invalid_verdict() {
+ let (_temp, repo) = setup_repo();
+ let cmd = CollectEvidence {
+ repo_root: repo,
+ task_id: "task-20260529-001".to_string(),
+ backend_output_dir: None,
+ normalized_dir: None,
+ review_verdict: "garbage".to_string(),
+ execution_completeness: "full".to_string(),
+ };
+ assert!(cmd.run().is_err());
+ }
+
+ #[test]
+ fn test_validate_evidence_command_accepts_clean() {
+ let (_temp, repo) = setup_repo();
+ let task_id = "task-20260529-001";
+ let backend_output = repo.join("backend-output");
+ ensure_dir(&backend_output).unwrap();
+ // Pre-populate backend output with raw artifacts.
+ fs::write(backend_output.join("diff.patch"), "--- a/x\n+++ b/x\n").unwrap();
+ let changed = serde_json::json!({
+ "schema_version": "changed-files-v1",
+ "task_id": task_id,
+ "files": [{"path": "src/lib.rs", "operation": "modify"}]
+ });
+ fs::write(backend_output.join("changed_files.json"), serde_json::to_string(&changed).unwrap()).unwrap();
+ let verification = serde_json::json!({
+ "schema_version": "verification-v1",
+ "task_id": task_id,
+ "results": [{"command": "cargo test", "exit_code":0, "passed": true}]
+ });
+ fs::write(backend_output.join("verification.json"), serde_json::to_string(&verification).unwrap()).unwrap();
+ fs::write(backend_output.join("execution_trace.jsonl"), b"{\"event\":\"x\",\"timestamp\":\"2026-05-29T12:00:00Z\"}\n").unwrap();
+ let normalized = repo.join("normalized");
+ ensure_dir(&normalized).unwrap();
+
+ // Write a clean set.
+ let collect = CollectEvidence {
+ repo_root: repo.clone(),
+ task_id: task_id.to_string(),
+ backend_output_dir: Some(backend_output.clone()),
+ normalized_dir: Some(normalized.clone()),
+ review_verdict: "pass".to_string(),
+ execution_completeness: "full".to_string(),
+ };
+ collect.run().unwrap();
+
+ let validate = ValidateEvidence {
+ repo_root: repo,
+ task_id: task_id.to_string(),
+ normalized_dir: Some(normalized.clone()),
+ quiet: true,
+ };
+ assert!(validate.run().is_ok());
+ }
+
+ #[test]
+ fn test_validate_evidence_command_rejects_missing() {
+ let (_temp, repo) = setup_repo();
+ let normalized = repo.join("normalized");
+ ensure_dir(&normalized).unwrap();
+ let validate = ValidateEvidence {
+ repo_root: repo,
+ task_id: "task-20260529-001".to_string(),
+ normalized_dir: Some(normalized),
+ quiet: true,
+ };
+ assert!(validate.run().is_err());
+ }
+
+ #[test]
+ fn test_validate_evidence_command_rejects_schema_violation() {
+ let (_temp, repo) = setup_repo();
+ let task_id = "task-20260529-001";
+ let backend_output = repo.join("backend-output");
+ ensure_dir(&backend_output).unwrap();
+ let normalized = repo.join("normalized");
+ ensure_dir(&normalized).unwrap();
+
+ let collect = CollectEvidence {
+ repo_root: repo.clone(),
+ task_id: task_id.to_string(),
+ backend_output_dir: Some(backend_output.clone()),
+ normalized_dir: Some(normalized.clone()),
+ review_verdict: "pass".to_string(),
+ execution_completeness: "full".to_string(),
+ };
+ collect.run().unwrap();
+
+ // Tamper with verification.json.
+ let bad = serde_json::json!({
+ "schema_version": "verification-v1",
+ "task_id": task_id,
+ "results": [{"command": "x", "exit_code":0}]
+ });
+ fs::write(
+ normalized.join("verification.json"),
+ serde_json::to_string(&bad).unwrap(),
+ )
+ .unwrap();
+
+ let validate = ValidateEvidence {
+ repo_root: repo,
+ task_id: task_id.to_string(),
+ normalized_dir: Some(normalized),
+ quiet: true,
+ };
+ assert!(validate.run().is_err());
+ }
+}
