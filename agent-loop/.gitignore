@@ -2,6 +2,10 @@
 /target/
 Cargo.lock
 
+# Agent loop artifacts
+.agent-runs/
+.worktrees/
+
 # IDE
 .idea/
 .vscode/

@@ -268,6 +268,38 @@ enum Commands {
         #[arg(long, default_value = ".")]
         repo_root: PathBuf,
     },
+    Cleanup {
+        #[arg(long)]
+        task_id: Option<String>,
+        #[arg(long)]
+        plan_id: Option<String>,
+        #[arg(long)]
+        status: Option<String>,
+        #[arg(long)]
+        older_than: Option<u32>,
+        #[arg(long)]
+        worktrees: bool,
+        #[arg(long)]
+        evidence: bool,
+        #[arg(long, short)]
+        confirm: bool,
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
+    Export {
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long, default_value = "false")]
+        full: bool,
+        #[arg(long)]
+        acknowledge_full_export_risk: bool,
+        #[arg(long, short)]
+        quiet: bool,
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
 }
 
 fn main() -> std::process::ExitCode {
@@ -424,6 +456,53 @@ fn main() -> std::process::ExitCode {
         } => commands::PreToolCheck {
             repo_root,
             task_id,
+        }
+        .run(),
+
+        Commands::Cleanup {
+            task_id,
+            plan_id,
+            status,
+            older_than,
+            worktrees,
+            evidence,
+            confirm,
+            repo_root,
+        } => {
+            let status_filter = status.and_then(|s| match s.as_str() {
+                "active" => Some(artifacts::TaskStatus::Active),
+                "committed" => Some(artifacts::TaskStatus::Committed),
+                "blocked" => Some(artifacts::TaskStatus::Blocked),
+                "abandoned" => Some(artifacts::TaskStatus::Abandoned),
+                _ => None,
+            });
+            commands::Cleanup {
+                repo_root,
+                task_id,
+                plan_id,
+                status_filter,
+                older_than,
+                worktrees,
+                evidence,
+                confirm,
+            }
+            .run()
+        }
+
+        Commands::Export {
+            task_id,
+            output,
+            full,
+            acknowledge_full_export_risk,
+            quiet,
+            repo_root,
+        } => commands::Export {
+            repo_root,
+            task_id,
+            output,
+            full,
+            acknowledge_full_export_risk,
+            quiet,
         }
         .run(),
     };

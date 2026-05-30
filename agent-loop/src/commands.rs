@@ -55,6 +55,134 @@ impl From<serde_json::Error> for CommandError {
     }
 }
 
+
+// ============================================================================
+// cleanup command
+// ============================================================================
+
+/// Cleanup task artifacts (worktrees and/or evidence).
+pub struct Cleanup {
+    pub repo_root: PathBuf,
+    pub task_id: Option<String>,
+    pub plan_id: Option<String>,
+    pub status_filter: Option<crate::artifacts::TaskStatus>,
+    pub older_than: Option<u32>,
+    pub worktrees: bool,
+    pub evidence: bool,
+    pub confirm: bool,
+}
+
+impl Cleanup {
+    pub fn run(&self) -> CommandResult {
+        let has_selector = self.task_id.is_some()
+            || self.plan_id.is_some()
+            || self.status_filter.is_some()
+            || self.older_than.is_some()
+            || self.worktrees
+            || self.evidence;
+
+        if !has_selector {
+            return Err(CommandError::InvalidInput(
+                "At least one selector is required".to_string(),
+            ));
+        }
+
+        let repo_root = find_repo_root(&self.repo_root)
+            .ok_or_else(|| CommandError::NotFound("Not inside a git repository".to_string()))?;
+
+        let agent_paths = AgentRunsPaths::new(&repo_root);
+        let worktree_paths = WorktreePaths::new(&repo_root);
+        let tasks_root = agent_paths.tasks_root();
+
+        if !tasks_root.exists() {
+            println!("No tasks found.");
+            return Ok(());
+        }
+
+        let mut to_clean = Vec::new();
+
+        for task_dir in list_subdirs(&tasks_root)? {
+            let task_id_str = task_dir.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+
+            if TaskId::parse(task_id_str).is_none() {
+                continue;
+            }
+
+            let status_path = task_dir.join("status.json");
+            if !status_path.exists() {
+                continue;
+            }
+
+            let status: StatusJson = read_json(&status_path)?;
+
+            if let Some(ref tid) = self.task_id {
+                if tid != task_id_str {
+                    continue;
+                }
+            }
+
+            if let Some(ref sf) = self.status_filter {
+                if &status.status != sf {
+                    continue;
+                }
+            }
+
+            if let Some(ref pid) = self.plan_id {
+                if &status.plan_id != pid {
+                    continue;
+                }
+            }
+
+            if let Some(threshold) = self.older_than {
+                if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(&status.created_at) {
+                    let age = chrono::Local::now().timestamp() - ts.timestamp();
+                    if age <= threshold as i64 {
+                        continue;
+                    }
+                }
+            }
+
+            if self.worktrees {
+                let wt = worktree_paths.worktree(task_id_str);
+                if wt.exists() {
+                    to_clean.push((task_id_str.to_string(), wt));
+                }
+            }
+
+            if self.evidence {
+                to_clean.push((task_id_str.to_string(), task_dir));
+            }
+        }
+
+        if to_clean.is_empty() {
+            println!("No tasks found matching selectors.");
+            return Ok(());
+        }
+
+        // Preview by default (unless --confirm is passed)
+        if !self.confirm {
+            println!("Dry run: {} task(s) would be cleaned.", to_clean.len());
+            for (task_id, path) in &to_clean {
+                println!("  {}: {}", task_id, path.display());
+            }
+        } else {
+            let mut cleaned = 0;
+            for (task_id, path) in &to_clean {
+                if path.is_dir() {
+                    if std::fs::remove_dir_all(path).is_ok() {
+                        println!("Removed: {}", task_id);
+                        cleaned += 1;
+                    }
+                }
+            }
+            println!("Cleaned {} task(s).", cleaned);
+        }
+
+        Ok(())
+    }
+}
 // ============================================================================
 // init-run command
 // ============================================================================
@@ -119,6 +247,378 @@ impl InitRun {
         println!("  Task dir: {}", task_dir.display());
 
         Ok(())
+    }
+}
+
+// ============================================================================
+// export command
+// ============================================================================
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExportOutput {
+    pub schema_version: String,
+    pub task_id: String,
+    pub plan_id: Option<String>,
+    pub contract_id: Option<String>,
+    pub contract_summary: Option<serde_json::Value>,
+    pub changed_files: Option<Vec<serde_json::Value>>,
+    pub diff_summary: Option<serde_json::Value>,
+    pub verification: Option<Vec<serde_json::Value>>,
+    pub external_verdict: Option<String>,
+    pub sonnet_verdict: Option<serde_json::Value>,
+    pub opus_decision: Option<String>,
+    pub blocking_issues: Vec<String>,
+    pub residual_risks: Vec<String>,
+    pub accepted_risks: Vec<String>,
+    pub secrets: Vec<String>,
+    pub full_export: bool,
+    pub raw_outputs: Option<serde_json::Value>,
+}
+
+const UNSAFE_PATTERNS: [&str; 8] = [
+    ".env", ".aws", "id_rsa", "id_ed25519",
+    ".git-credentials", ".npmrc", ".pypirc", "credentials",
+];
+
+pub struct Export {
+    pub repo_root: PathBuf,
+    pub task_id: String,
+    pub output: Option<PathBuf>,
+    pub full: bool,
+    pub acknowledge_full_export_risk: bool,
+    pub quiet: bool,
+}
+
+impl Export {
+    pub fn run(&self) -> CommandResult {
+        if self.full && !self.acknowledge_full_export_risk {
+            return Err(CommandError::InvalidInput(
+                "Full export requires --acknowledge-full-export-risk".to_string(),
+            ));
+        }
+
+        let repo_root = find_repo_root(&self.repo_root)
+            .ok_or_else(|| CommandError::NotFound("Not inside a git repository".to_string()))?;
+
+        let paths = AgentRunsPaths::new(&repo_root);
+        let task_dir = paths.task_dir(&self.task_id);
+
+        if !task_dir.exists() {
+            return Err(CommandError::NotFound(format!("Task not found: {}", self.task_id)));
+        }
+
+        let normalized_dir = paths.normalized_dir(&self.task_id);
+
+        // Read status
+        let (plan_id, contract_id) = if paths.task_status(&self.task_id).exists() {
+            if let Ok(status) = read_json::<StatusJson>(&paths.task_status(&self.task_id)) {
+                (Some(status.plan_id), Some(status.contract_id))
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
+        // Contract summary
+        let mut contract_summary = None;
+        {
+            let path = paths.task_contract(&self.task_id);
+            if path.exists() {
+                if let Ok(v) = read_json::<serde_json::Value>(&path) {
+                    contract_summary = Some(serde_json::json!({
+                        "objective": v.get("objective"),
+                        "risk_class": v.get("risk_class"),
+                        "scope": v.get("scope"),
+                    }));
+                }
+            }
+        };
+
+        // Changed files (sanitized)
+        let mut changed_files = None;
+        {
+            let cf_path = normalized_dir.join("changed_files.json");
+            if cf_path.exists() {
+                if let Ok(cf) = read_json::<serde_json::Value>(&cf_path) {
+                    if let Some(files) = cf.get("files").and_then(|f| f.as_array()) {
+                        let safe: Vec<_> = files.iter()
+                            .filter_map(|f| {
+                                let path = f.get("path")?.as_str()?;
+                                if Self::is_unsafe_path(path) {
+                                    return None;
+                                }
+                                Some(serde_json::json!({
+                                    "path": Self::sanitize_path(path),
+                                    "operation": f.get("operation"),
+                                }))
+                            })
+                            .collect();
+                        if !safe.is_empty() {
+                            changed_files = Some(safe);
+                        }
+                    }
+                }
+            }
+        };
+
+        // Diff summary
+        let mut diff_summary = None;
+        {
+            let diff_path = normalized_dir.join("diff.patch");
+            if diff_path.exists() {
+                if let Ok(diff) = std::fs::read_to_string(&diff_path) {
+                    let (files, ins, dels) = Self::parse_diff(&diff);
+                    diff_summary = Some(serde_json::json!({
+                        "files_changed": files,
+                        "insertions": ins,
+                        "deletions": dels,
+                        "has_secrets": Self::contains_secrets(&diff),
+                    }));
+                }
+            }
+        };
+
+        // Verification (sanitized)
+        let mut verification = None;
+        {
+            let v_path = normalized_dir.join("verification.json");
+            if v_path.exists() {
+                if let Ok(v) = read_json::<serde_json::Value>(&v_path) {
+                    if let Some(results) = v.get("results").and_then(|r| r.as_array()) {
+                        let sanitized: Vec<_> = results.iter()
+                            .map(|r| {
+                                let cmd = r.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .map(|c| Self::sanitize_command(c))
+                                    .unwrap_or_default();
+                                serde_json::json!({
+                                    "command": cmd,
+                                    "exit_code": r.get("exit_code"),
+                                    "passed": r.get("passed"),
+                                })
+                            })
+                            .collect();
+                        if !sanitized.is_empty() {
+                            verification = Some(sanitized);
+                        }
+                    }
+                }
+            }
+        };
+
+        // External verdict
+        let mut external_verdict = None;
+        {
+            let path = normalized_dir.join("external_review.json");
+            if path.exists() {
+                if let Ok(v) = read_json::<serde_json::Value>(&path) {
+                    external_verdict = v.get("verdict").and_then(|v| v.as_str()).map(String::from);
+                }
+            }
+        };
+
+        // Sonnet verdict
+        let mut sonnet_verdict = None;
+        {
+            let path = task_dir.join("sonnet_review.json");
+            if path.exists() {
+                if let Ok(v) = read_json::<serde_json::Value>(&path) {
+                    let blockers: Vec<_> = v.get("blockers")
+                        .and_then(|b| b.as_array())
+                        .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                        .unwrap_or_default();
+                    sonnet_verdict = Some(serde_json::json!({
+                        "recommendation": v.get("recommendation"),
+                        "blockers": blockers,
+                        "non_blockers": v.get("non_blockers"),
+                    }));
+                }
+            }
+        };
+
+        // Opus decision
+        let mut opus_decision = None;
+        {
+            let path = paths.opus_final_gate(&self.task_id);
+            if path.exists() {
+                if let Ok(v) = read_json::<serde_json::Value>(&path) {
+                    opus_decision = v.get("decision").and_then(|v| v.as_str()).map(String::from);
+                }
+            }
+        };
+
+        // Residual/accepted risks
+        let mut residual_risks = Vec::new();
+        let mut accepted_risks = Vec::new();
+        {
+            let path = normalized_dir.join("sensitive_audit.json");
+            if path.exists() {
+                if let Ok(v) = read_json::<serde_json::Value>(&path) {
+                    residual_risks = v.get("residual_risks")
+                        .and_then(|r| r.as_array())
+                        .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                        .unwrap_or_default();
+                    accepted_risks = v.get("accepted_risks")
+                        .and_then(|a| a.as_array())
+                        .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                        .unwrap_or_default();
+                }
+            }
+        };
+
+        // Scan for secrets
+        let mut secrets = Vec::new();
+        Self::scan_dir_recursive(&task_dir, &mut secrets);
+        Self::scan_dir_recursive(&normalized_dir, &mut secrets);
+
+        // Raw outputs for full export
+        let mut raw_outputs = None;
+        if self.full {
+            let backend_dir = paths.backend_output_dir(&self.task_id);
+            if backend_dir.exists() {
+                let mut outputs = serde_json::Map::new();
+                if let Ok(entries) = std::fs::read_dir(&backend_dir) {
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let path = entry.path();
+                        if path.is_file() {
+                            if let Ok(content) = std::fs::read_to_string(&path) {
+                                if let Ok(val) = serde_json::from_str(&content) {
+                                    outputs.insert(name, val);
+                                } else {
+                                    outputs.insert(name, serde_json::Value::String(content));
+                                }
+                            }
+                        }
+                    }
+                }
+                raw_outputs = Some(serde_json::Value::Object(outputs));
+            }
+        };
+
+        let output = ExportOutput {
+            schema_version: "export-sanitized-v1".to_string(),
+            task_id: self.task_id.clone(),
+            plan_id,
+            contract_id,
+            contract_summary,
+            changed_files,
+            diff_summary,
+            verification,
+            external_verdict,
+            sonnet_verdict,
+            opus_decision,
+            blocking_issues: Vec::new(),
+            residual_risks,
+            accepted_risks,
+            secrets,
+            full_export: self.full,
+            raw_outputs,
+        };
+
+        let json = serde_json::to_string_pretty(&output)
+            .map_err(|e| CommandError::Json(e))?;
+
+        match &self.output {
+            Some(path) => {
+                std::fs::write(path, &json)?;
+                if !self.quiet {
+                    println!("Exported: {}", path.display());
+                }
+            }
+            None => println!("{}", json),
+        }
+
+        Ok(())
+    }
+
+    fn is_unsafe_path(path: &str) -> bool {
+        let lower = path.to_lowercase();
+        UNSAFE_PATTERNS.iter().any(|p| lower.contains(&p.to_lowercase()))
+    }
+
+    fn sanitize_path(path: &str) -> String {
+        // For absolute paths, return just the filename (no directory leak).
+        let lower = path.to_lowercase();
+        if path.starts_with('/') || path.contains(":/") || lower.starts_with("c:") {
+            return path.split('/').last().unwrap_or(path).to_string();
+        }
+        // Safe relative path - preserve the full safe path (e.g. src/lib.rs).
+        // Unsafe paths are already filtered out by the caller before this is called.
+        path.to_string()
+    }
+
+    fn sanitize_command(cmd: &str) -> String {
+        let mut result = cmd.to_string();
+        let patterns = [
+            (r"(?i)(token|password|secret|apikey|api_key|bearer|sk-)=[^\s]+", "$1=[REDACTED]"),
+            (r"(?i)--token=[^\s]+", "--token=[REDACTED]"),
+            (r"(?i)--password=[^\s]+", "--password=[REDACTED]"),
+            (r"/[^\s]+", ""),
+        ];
+        for (p, r) in patterns {
+            if let Ok(re) = regex::Regex::new(p) {
+                result = re.replace_all(&result, r).to_string();
+            }
+        }
+        result.trim().to_string()
+    }
+
+    fn contains_secrets(diff: &str) -> bool {
+        let lower = diff.to_lowercase();
+        UNSAFE_PATTERNS.iter().any(|p| lower.contains(&p.to_lowercase()))
+    }
+
+    fn parse_diff(diff: &str) -> (usize, usize, usize) {
+        let mut files = 0;
+        let mut ins = 0;
+        let mut dels = 0;
+        for line in diff.lines() {
+            if line.starts_with("--- ") || line.starts_with("+++ ") {
+                files += 1;
+            } else if line.starts_with('+') && !line.starts_with("+++ ") {
+                ins += 1;
+            } else if line.starts_with('-') && !line.starts_with("--- ") {
+                dels += 1;
+            }
+        }
+        (files, ins, dels)
+    }
+
+    fn scan_dir_recursive(dir: &Path, found: &mut Vec<String>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let name = path.file_name()
+                        .map(|n| n.to_string_lossy().to_lowercase())
+                        .unwrap_or_default();
+                    if UNSAFE_PATTERNS.iter().any(|p| name.contains(&p.to_lowercase())) {
+                        found.push(path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+                    } else if let Ok(content) = std::fs::read_to_string(&path) {
+                        if Self::content_has_secrets(&content) {
+                            found.push(path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+                        }
+                    }
+                } else if path.is_dir() {
+                    Self::scan_dir_recursive(&path, found);
+                }
+            }
+        }
+    }
+
+    fn content_has_secrets(content: &str) -> bool {
+        let patterns = [
+            r"(?i)(token|password|secret|apikey|api_key|bearer|sk-)=",
+            r"(?i)(aws_key|ghp_|gho_)",
+        ];
+        for p in patterns {
+            if regex::Regex::new(p).map(|r| r.is_match(content)).unwrap_or(false) {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -1867,7 +2367,8 @@ impl GitGuard {
                     }
                     // Worktree is clean - fall through to allowed.
                 } else {
-    
+
+
                     println!("pending: cannot verify worktree status");
                     println!("status: pending");
                     return Ok(());

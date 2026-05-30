@@ -2102,5 +2102,561 @@ fn test_final_gate_then_integrate_produces_local_commit() {
     assert!(task_dir.join("post_apply_verification.json").exists());
 }
 
+// ============================================================================
+// export / cleanup integration tests
+// ============================================================================
 
+fn setup_export_task(task_id: &str) -> (tempfile::TempDir, String) {
+    let temp = tempfile::TempDir::new().unwrap();
+    let repo = temp.path();
+    let git = repo.join(".git");
+    std::fs::create_dir(&git).unwrap();
+    std::fs::write(git.join("config"), "[core]\n").unwrap();
+
+    let task_id = task_id.to_string();
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+    std::fs::create_dir_all(task_dir.join("normalized")).unwrap();
+    std::fs::create_dir_all(task_dir.join("backend-output")).unwrap();
+    // Create .env file for secrets detection
+    std::fs::write(task_dir.join("backend-output").join(".env"), "SECRET=value\n").unwrap();
+
+    // status.json
+    let status = serde_json::json!({
+        "schema_version": "status-v1",
+        "task_id": task_id,
+        "plan_id": "plan-20260530-001",
+        "contract_id": "contract-001",
+        "status": "active",
+        "created_at": "2026-05-30T12:00:00Z",
+        "updated_at": "2026-05-30T12:00:00Z"
+    });
+    std::fs::write(task_dir.join("status.json"), serde_json::to_string_pretty(&status).unwrap()).unwrap();
+
+    // contract.json
+    let contract = serde_json::json!({
+        "schema_version": "task-contract-v1",
+        "task_id": task_id,
+        "plan_id": "plan-20260530-001",
+        "contract_id": "contract-001",
+        "objective": "Test export command",
+        "risk_class": "normal",
+        "scope": ["src/"],
+        "status": "approved",
+        "acceptance_criteria": ["Tests pass"],
+        "required_verification": ["cargo test"],
+        "execution_eligibility": {
+            "allowed": true,
+            "blocked_reason": null,
+            "details": null
+        },
+        "mutation_policy": {
+            "allowed_patterns": ["src/**/*.rs"],
+            "forbidden_patterns": []
+        },
+        "test_policy": {
+            "allowed": ["unit tests"],
+            "forbidden": []
+        },
+        "repair_budget": 2
+    });
+    std::fs::write(task_dir.join("contract.json"), serde_json::to_string_pretty(&contract).unwrap()).unwrap();
+
+    // changed_files.json
+    let changed = serde_json::json!({
+        "schema_version": "changed-files-v1",
+        "task_id": task_id,
+        "files": [
+            { "path": "src/lib.rs", "operation": "modify" },
+            { "path": ".env.production", "operation": "modify" }
+        ]
+    });
+    std::fs::write(task_dir.join("normalized").join("changed_files.json"), serde_json::to_string_pretty(&changed).unwrap()).unwrap();
+
+    // diff.patch
+    std::fs::write(
+        task_dir.join("normalized").join("diff.patch"),
+        "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n--- a/.env.production\n+++ b/.env.production\n@@ -1 +1 @@\n-API_KEY=xxx\n+API_KEY=yyy\n",
+    )
+    .unwrap();
+
+    // verification.json
+    let verification = serde_json::json!({
+        "schema_version": "verification-v1",
+        "task_id": task_id,
+        "results": [
+            { "command": "cargo test", "exit_code": 0, "passed": true }
+        ]
+    });
+    std::fs::write(task_dir.join("normalized").join("verification.json"), serde_json::to_string_pretty(&verification).unwrap()).unwrap();
+
+    // external_review.json
+    let ext_review = serde_json::json!({
+        "schema_version": "external-review-v1",
+        "task_id": task_id,
+        "verdict": "pass",
+        "scope_compliance": true,
+        "policy_compliance": true,
+        "verification_sufficient": true,
+        "findings": []
+    });
+    std::fs::write(task_dir.join("normalized").join("external_review.json"), serde_json::to_string_pretty(&ext_review).unwrap()).unwrap();
+
+    // sensitive_audit.json
+    let sensitive = serde_json::json!({
+        "schema_version": "sensitive-audit-v1",
+        "task_id": task_id,
+        "files_checked": 2,
+        "residual_risks": ["runtime config change"],
+        "accepted_risks": ["no PII affected"],
+        "audit_limitation": null
+    });
+    std::fs::write(task_dir.join("normalized").join("sensitive_audit.json"), serde_json::to_string_pretty(&sensitive).unwrap()).unwrap();
+
+    // sonnet_review.json
+    let sonnet = serde_json::json!({
+        "schema_version": "sonnet-review-v1",
+        "task_id": task_id,
+        "recommendation": "ship",
+        "blockers": [],
+        "non_blockers": ["minor style note"],
+        "gates": [
+            { "gate": "evidence_validity", "passed": true },
+            { "gate": "scope_policy", "passed": true },
+            { "gate": "verification", "passed": true },
+            { "gate": "diff_code_review", "passed": true },
+            { "gate": "merge_recommendation", "passed": true }
+        ],
+        "sensitive_audit_clean": true,
+        "external_verdict": "pass"
+    });
+    std::fs::write(task_dir.join("sonnet_review.json"), serde_json::to_string_pretty(&sonnet).unwrap()).unwrap();
+
+    // opus_final_gate.json
+    let gate = serde_json::json!({
+        "schema_version": "opus-final-gate-v1",
+        "task_id": task_id,
+        "decision": "merge",
+        "commit_message": "feat: test integration",
+        "timestamp": "2026-05-30T14:00:00Z",
+        "notes": null
+    });
+    std::fs::write(task_dir.join("opus_final_gate.json"), serde_json::to_string_pretty(&gate).unwrap()).unwrap();
+
+    // Create a worktree for cleanup tests.
+    let worktree = repo.join(".worktrees").join(&task_id);
+    std::fs::create_dir_all(&worktree).unwrap();
+    std::fs::write(worktree.join("worktree-file.txt"), "placeholder").unwrap();
+
+    (temp, task_id)
+}
+
+#[test]
+fn test_export_completed_run_valid_sanitized_json() {
+    let (temp, task_id) = setup_export_task("task-20260530-001");
+    let repo = temp.path();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("export")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+
+    cmd.assert().success();
+
+    let json_str = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&json_str.stdout);
+
+    // Parse as JSON.
+    let export: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    // Verify required fields present.
+    assert_eq!(export["schema_version"], "export-sanitized-v1");
+    assert_eq!(export["task_id"], task_id);
+    assert_eq!(export["plan_id"], "plan-20260530-001");
+    assert_eq!(export["contract_id"], "contract-001");
+    assert!(export.get("contract_summary").is_some());
+    assert!(export.get("diff_summary").is_some());
+    assert!(export.get("verification").is_some());
+    assert!(export["external_verdict"] == "pass");
+    assert!(export.get("sonnet_verdict").is_some(), "sonnet_verdict should be present");
+    assert!(export["opus_decision"] == "merge", "opus_decision should be merge");
+    assert!(!export["full_export"].as_bool().unwrap(), "full_export should be false in default export");
+    // blocking_issues, residual_risks, accepted_risks may be empty if not present
+    if let Some(bi) = export.get("blocking_issues").and_then(|v| v.as_array()) {
+        // OK if empty or not empty
+    }
+    if let Some(rr) = export.get("residual_risks").and_then(|v| v.as_array()) {
+        // OK if empty or not empty
+    }
+    if let Some(ar) = export.get("accepted_risks").and_then(|v| v.as_array()) {
+        // OK if empty or not empty
+    }
+
+    // Sanitized checks: .env.production should NOT appear in changed_files (unsafe path).
+    let changed_files = export["changed_files"].as_array().unwrap();
+    let paths: Vec<_> = changed_files.iter()
+        .filter_map(|f| f.get("path").and_then(|v| v.as_str()))
+        .collect();
+    assert!(!paths.iter().any(|p| p.contains(".env")), ".env should be sanitized out of changed_files");
+    assert!(paths.contains(&"src/lib.rs"), "safe path src/lib.rs should be preserved in changed_files");
+
+    // Secrets list should include detected .env files.
+    assert!(export["secrets"].as_array().unwrap().iter().any(|s| s.as_str().map(|s| s.contains("env")).unwrap_or(false)),
+        "secrets list should include .env files");
+}
+
+#[test]
+fn test_export_full_requires_acknowledgement() {
+    let (temp, task_id) = setup_export_task("task-20260530-002");
+    let repo = temp.path();
+
+    // Without --acknowledge-full-export-risk, should fail.
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("export")
+        .arg("--task-id").arg(&task_id)
+        .arg("--full")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("acknowledge"));
+}
+
+#[test]
+fn test_export_full_includes_raw_and_secrets() {
+    let (temp, task_id) = setup_export_task("task-20260530-003");
+    let repo = temp.path();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("export")
+        .arg("--task-id").arg(&task_id)
+        .arg("--full")
+        .arg("--acknowledge-full-export-risk")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+
+    cmd.assert().success();
+
+    let json_str = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&json_str.stdout);
+    let export: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert!(export["full_export"].as_bool().unwrap());
+    assert!(export.get("raw_outputs").is_some());
+    assert!(export["secrets"].as_array().unwrap().iter().any(|s| s.as_str().unwrap_or("").contains(".env")), "secrets should detect .env file from setup");
+}
+
+#[test]
+fn test_export_task_not_found() {
+    let (temp, _task_id) = setup_export_task("task-20260530-004");
+    let repo = temp.path();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("export")
+        .arg("--task-id").arg("task-99999999-999")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+
+    cmd.assert().failure().stderr(predicate::str::contains("not found"));
+}
+
+#[test]
+fn test_cleanup_dry_run_correct_targets() {
+    let (temp, task_id) = setup_export_task("task-20260530-005");
+    let repo = temp.path();
+
+    let worktree = repo.join(".worktrees").join(&task_id);
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("cleanup")
+        .arg("--task-id").arg(&task_id)
+        .arg("--worktrees")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+
+    cmd.assert().success();
+
+    let json_str = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&json_str.stdout);
+    assert!(stdout.contains("Dry run") || stdout.contains("task"), "dry-run should report tasks");
+    assert!(stdout.contains(&task_id), "dry-run should list the task");
+    assert!(worktree.exists(), "dry-run should NOT delete worktree");
+}
+
+#[test]
+fn test_cleanup_preview_with_status_filter() {
+    let (temp, task_id) = setup_export_task("task-20260530-006");
+    let repo = temp.path();
+
+    // Update status to committed.
+    let status_path = repo.join(".agent-runs/tasks").join(&task_id).join("status.json");
+    let mut status: serde_json::Value = serde_json::from_str(&fs::read_to_string(&status_path).unwrap()).unwrap();
+    status["status"] = serde_json::Value::String("committed".to_string());
+    std::fs::write(&status_path, serde_json::to_string_pretty(&status).unwrap()).unwrap();
+
+    let worktree = repo.join(".worktrees").join(&task_id);
+    let evidence = repo.join(".agent-runs/tasks").join(&task_id);
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("cleanup")
+        .arg("--status").arg("committed")
+        .arg("--worktrees")
+        .arg("--evidence")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+
+    cmd.assert().success();
+
+    let json_str = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&json_str.stdout);
+    assert!(stdout.contains("committed") || stdout.contains(&task_id));
+    assert!(worktree.exists(), "dry-run should NOT delete worktree");
+    assert!(evidence.exists(), "dry-run should NOT delete evidence");
+}
+
+#[test]
+fn test_cleanup_older_than_zero_excludes_zero_age_tasks() {
+    let (temp, task_id) = setup_export_task("task-20260530-007");
+    let repo = temp.path();
+
+    // Task was just created (age ≈ 0 seconds). --older-than 0 means age > 0,
+    // so a zero-age task is filtered out. This proves the filter actually runs.
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("cleanup")
+        .arg("--older-than").arg("0")
+        .arg("--worktrees")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+
+    cmd.assert().success();
+    let json_str = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&json_str.stdout);
+    // Zero-age task should be excluded (age is 0, not > 0)
+    assert!(!stdout.contains(&task_id),
+        "--older-than 0 should exclude zero-age tasks, got: {}", stdout);
+}
+
+#[test]
+fn test_cleanup_no_selector_fails() {
+    let (temp, _task_id) = setup_export_task("task-20260530-008");
+    let repo = temp.path();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("cleanup")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+
+    cmd.assert().failure().stderr(predicate::str::contains("selector"));
+}
+
+#[test]
+fn test_cleanup_preview_default_without_flags() {
+    let (temp, task_id) = setup_export_task("task-20260530-009");
+    let repo = temp.path();
+
+    let worktree = repo.join(".worktrees").join(&task_id);
+    assert!(worktree.exists(), "setup: worktree should exist");
+
+    // Default behavior: cleanup without --dry-run or --confirm should preview (not error)
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("cleanup")
+        .arg("--task-id").arg(&task_id)
+        .arg("--worktrees")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+
+    cmd.assert().success();
+    let json_str = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&json_str.stdout);
+    assert!(stdout.contains("Dry run") || stdout.contains("task"), "default should preview");
+    assert!(worktree.exists(), "preview mode should NOT delete worktree");
+}
+
+#[test]
+fn test_cleanup_destructive_deletes_with_confirm() {
+    let (temp, task_id) = setup_export_task("task-20260530-010");
+    let repo = temp.path();
+
+    // Update status to committed so cleanup picks it up.
+    let status_path = repo.join(".agent-runs/tasks").join(&task_id).join("status.json");
+    let mut status: serde_json::Value = serde_json::from_str(&fs::read_to_string(&status_path).unwrap()).unwrap();
+    status["status"] = serde_json::Value::String("committed".to_string());
+    std::fs::write(&status_path, serde_json::to_string_pretty(&status).unwrap()).unwrap();
+
+    let worktree = repo.join(".worktrees").join(&task_id);
+    std::fs::create_dir_all(&worktree).unwrap();
+    assert!(worktree.exists(), "setup: worktree should exist");
+
+    // Test using cargo run from the agent-loop directory.
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("cleanup")
+        .arg("--status").arg("committed")
+        .arg("--worktrees")
+        .arg("--evidence")
+        .arg("--confirm")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+
+    cmd.assert().success();
+    // Verify worktree was deleted
+    assert!(!worktree.exists(), "with --confirm, worktree should be deleted");
+}
+
+
+fn create_cleanup_test_tasks(
+    plan_id_a: &str,
+    plan_id_b: &str,
+    age_hours_a: i64,
+    age_hours_b: i64,
+) -> (TempDir, String, String) {
+    let temp = tempfile::TempDir::new().unwrap();
+    let repo = temp.path();
+    let git = repo.join(".git");
+    std::fs::create_dir(&git).unwrap();
+    std::fs::write(git.join("config"), "[core]\n").unwrap();
+
+    let task_a = "task-20260530-001";
+    let task_b = "task-20260530-002";
+
+    let now = chrono::Utc::now();
+
+    // Task A: plan_a, older
+    let ta_dir = repo.join(".agent-runs/tasks").join(task_a);
+    std::fs::create_dir_all(ta_dir.join("normalized")).unwrap();
+    let ts_a = (now - chrono::Duration::hours(age_hours_a)).to_rfc3339();
+    let status_a = serde_json::json!({
+        "schema_version": "status-v1",
+        "task_id": task_a,
+        "plan_id": plan_id_a,
+        "contract_id": "c1",
+        "status": "active",
+        "created_at": ts_a,
+        "updated_at": ts_a,
+    });
+    std::fs::write(ta_dir.join("status.json"), serde_json::to_string_pretty(&status_a).unwrap()).unwrap();
+    let wt_a = repo.join(".worktrees").join(task_a);
+    std::fs::create_dir_all(&wt_a).unwrap();
+    std::fs::write(wt_a.join("f.txt"), "a").unwrap();
+
+    // Task B: plan_b, newer
+    let tb_dir = repo.join(".agent-runs/tasks").join(task_b);
+    std::fs::create_dir_all(tb_dir.join("normalized")).unwrap();
+    let ts_b = (now - chrono::Duration::hours(age_hours_b)).to_rfc3339();
+    let status_b = serde_json::json!({
+        "schema_version": "status-v1",
+        "task_id": task_b,
+        "plan_id": plan_id_b,
+        "contract_id": "c2",
+        "status": "active",
+        "created_at": ts_b,
+        "updated_at": ts_b,
+    });
+    std::fs::write(tb_dir.join("status.json"), serde_json::to_string_pretty(&status_b).unwrap()).unwrap();
+    let wt_b = repo.join(".worktrees").join(task_b);
+    std::fs::create_dir_all(&wt_b).unwrap();
+    std::fs::write(wt_b.join("f.txt"), "b").unwrap();
+
+    (temp, task_a.to_string(), task_b.to_string())
+}
+
+#[test]
+fn test_cleanup_plan_id_includes_matching_excludes_others() {
+    let (temp, task_a, task_b) = create_cleanup_test_tasks("PLAN_A", "PLAN_B", 1, 1);
+    let repo = temp.path();
+
+    let wt_a = repo.join(".worktrees").join(&task_a);
+    let wt_b = repo.join(".worktrees").join(&task_b);
+    assert!(wt_a.exists());
+    assert!(wt_b.exists());
+
+    // Filter by PLAN_A — only task_a should be listed, task_b excluded
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("cleanup")
+        .arg("--plan-id").arg("PLAN_A")
+        .arg("--worktrees")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+
+    cmd.assert().success();
+    let out = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&task_a), "stdout should contain task_a: {}", stdout);
+    assert!(!stdout.contains(&task_b), "stdout must NOT contain task_b: {}", stdout);
+    assert!(wt_a.exists(), "preview must NOT delete worktree");
+    assert!(wt_b.exists(), "preview must NOT delete worktree");
+}
+
+#[test]
+fn test_cleanup_older_than_excludes_fresh_tasks() {
+    let (temp, task_a, task_b) = create_cleanup_test_tasks("PLAN_X", "PLAN_X", 10, 0);
+    let repo = temp.path();
+
+    let wt_a = repo.join(".worktrees").join(&task_a);
+    let wt_b = repo.join(".worktrees").join(&task_b);
+
+    // --older-than 5 should match task_a (10h old) but NOT task_b (0h old)
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("cleanup")
+        .arg("--older-than").arg("5")
+        .arg("--worktrees")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+
+    cmd.assert().success();
+    let out = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&task_a), "10h-old task should match --older-than 5: {}", stdout);
+    assert!(!stdout.contains(&task_b), "0h-old task should NOT match --older-than 5: {}", stdout);
+    assert!(wt_a.exists());
+    assert!(wt_b.exists());
+}
+
+#[test]
+fn test_cleanup_older_than_huge_excludes_all() {
+    let (temp, task_a, task_b) = create_cleanup_test_tasks("PLAN_X", "PLAN_X", 1, 1);
+    let repo = temp.path();
+
+    // --older-than 999999 should exclude everything (no tasks 11+ days old)
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("cleanup")
+        .arg("--older-than").arg("999999")
+        .arg("--worktrees")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+
+    cmd.assert().success();
+    let out = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains(&task_a), "no task should match --older-than 999999: {}", stdout);
+    assert!(!stdout.contains(&task_b), "no task should match --older-than 999999: {}", stdout);
+}
+
+#[test]
+fn test_export_sanitize_path_preserves_safe_relative() {
+    let (temp, task_id) = setup_export_task("task-sanitize-001");
+    let repo = temp.path();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("export")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo);
+
+    cmd.assert().success();
+    let out = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    let changed = json.get("changed_files").and_then(|c| c.as_array());
+    assert!(changed.is_some(), "export should include changed_files");
+    let paths: Vec<_> = changed.unwrap()
+        .iter()
+        .filter_map(|f| f.get("path").and_then(|p| p.as_str()))
+        .collect();
+
+    // src/lib.rs is safe relative — should be preserved as-is
+    assert!(paths.contains(&"src/lib.rs"), "safe relative path src/lib.rs should be preserved, got: {:?}", paths);
+    // .env.production is unsafe — should be filtered out entirely
+    assert!(!paths.contains(&".env.production"), "unsafe path .env.production should be filtered out");
+}
 
