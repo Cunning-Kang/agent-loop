@@ -1095,3 +1095,138 @@ mod collect_validate_tests {
  assert!(validate.run().is_err());
  }
 }
+
+// ============================================================================
+// validate-sonnet-review command
+// ============================================================================
+
+/// Ordered list of required gates in the five-gate review order.
+const REQUIRED_GATE_ORDER: [&str; 5] = [
+    "evidence_validity",
+    "scope_policy",
+    "verification",
+    "diff_code_review",
+    "merge_recommendation",
+];
+
+/// Validate a sonnet_review.json artifact against the sonnet-review schema.
+/// Enforces the five-gate review order: evidence_validity -> scope_policy ->
+/// verification -> diff_code_review -> merge_recommendation.
+/// Reports per-gate validity; rejects reviews with wrong gate count or order.
+/// No semantic judgment, no repair, no modification.
+pub struct ValidateSonnetReview {
+    pub repo_root: PathBuf,
+    pub task_id: Option<String>,
+    pub path: Option<PathBuf>,
+    pub quiet: bool,
+}
+
+impl ValidateSonnetReview {
+    pub fn run(&self) -> CommandResult {
+        let review_path = match (&self.path, &self.task_id) {
+            (Some(p), _) => p.clone(),
+            (None, Some(task_id)) => {
+                let repo_root = find_repo_root(&self.repo_root)
+                    .ok_or_else(|| CommandError::NotFound("Not inside a git repository".to_string()))?;
+                let paths = AgentRunsPaths::new(&repo_root);
+                let review_path = paths.task_dir(task_id).join("sonnet_review.json");
+                if !review_path.exists() {
+                    return Err(CommandError::NotFound(format!(
+                        "sonnet_review.json not found for task {}",
+                        task_id
+                    )));
+                }
+                review_path
+            }
+            (None, None) => {
+                return Err(CommandError::InvalidInput(
+                    "Either --task-id or --path must be provided".to_string(),
+                ));
+            }
+        };
+
+        // Read and parse the JSON.
+        let content = std::fs::read_to_string(&review_path)?;
+        let json: serde_json::Value =
+            serde_json::from_str(&content).map_err(|e| CommandError::Json(e))?;
+
+        // Step 1: JSON Schema validation.
+        let schema: serde_json::Value =
+            serde_json::from_str(schemas::SONNET_REVIEW_SCHEMA)
+                .map_err(|e| CommandError::SchemaValidation(format!("Invalid schema: {}", e)))?;
+        let validator = Validator::new(&schema)
+            .map_err(|e| CommandError::SchemaValidation(e.to_string()))?;
+
+        let schema_errors: Vec<String> = validator
+            .iter_errors(&json)
+            .map(|e| format!("{}: {}", e.instance_path, e))
+            .collect();
+
+        if !schema_errors.is_empty() {
+            if !self.quiet {
+                eprintln!("Schema validation failed for {}:", review_path.display());
+                for err in &schema_errors {
+                    eprintln!("  - {}", err);
+                }
+            }
+            return Err(CommandError::SchemaValidation(schema_errors.join("; ")));
+        }
+
+        // Step 2: Gate-order enforcement.
+        let gates = json.get("gates").and_then(|g| g.as_array());
+        let gates = match gates {
+            Some(arr) => arr,
+            None => {
+                // Schema already validated this is present; shouldn't happen.
+                return Err(CommandError::SchemaValidation(
+                    "gates array missing".to_string(),
+                ));
+            }
+        };
+
+        if gates.len() != 5 {
+            if !self.quiet {
+                eprintln!(
+                    "Wrong number of gates: expected 5, got {}",
+                    gates.len()
+                );
+            }
+            return Err(CommandError::SchemaValidation(format!(
+                "Wrong gate count: expected 5 gates, got {}",
+                gates.len()
+            )));
+        }
+
+        for (i, (expected, actual_entry)) in REQUIRED_GATE_ORDER
+            .iter()
+            .zip(gates.iter())
+            .enumerate()
+        {
+            let actual_gate = actual_entry
+                .get("gate")
+                .and_then(|g| g.as_str())
+                .unwrap_or("");
+            if actual_gate != *expected {
+                if !self.quiet {
+                    eprintln!(
+                        "Gate order violation at position {}: expected '{}', got '{}'",
+                        i + 1,
+                        expected,
+                        actual_gate
+                    );
+                }
+                return Err(CommandError::SchemaValidation(format!(
+                    "Gate order violation at position {}: expected '{}', got '{}'",
+                    i + 1,
+                    expected,
+                    actual_gate
+                )));
+            }
+        }
+
+        if !self.quiet {
+            println!("sonnet_review.json: valid (five-gate order confirmed)");
+        }
+        Ok(())
+    }
+}

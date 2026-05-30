@@ -791,3 +791,221 @@ fn test_collect_evidence_deterministic_idempotent() {
  "all seven artifacts must be non-empty"
 );
 }
+// ============================================================================
+// /agent-review demonstration path
+// ============================================================================
+
+/// A complete, valid sonnet_review.json for testing.
+fn make_valid_sonnet_review(task_id: &str, merge: &str) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": "sonnet-review-v1",
+        "task_id": task_id,
+        "review_order_verified": true,
+        "gates": [
+            { "gate": "evidence_validity", "passed": true, "notes": "All artifacts validate" },
+            { "gate": "scope_policy", "passed": true, "notes": "Scope compliance confirmed" },
+            { "gate": "verification", "passed": true, "notes": "Required verification passed" },
+            { "gate": "diff_code_review", "passed": true, "notes": "Code review passed" },
+            { "gate": "merge_recommendation", "passed": true, "notes": "Ready for integration", "recommendation": merge }
+        ],
+        "merge": merge,
+        "summary": "All five gates passed"
+    })
+}
+
+#[test]
+fn test_validate_sonnet_review_fails_missing_file() {
+    let repo = create_test_repo();
+    let repo_path = repo.path();
+    let task_id = "task-20260529-001";
+    let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
+    fs::create_dir_all(&task_dir).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("validate-sonnet-review")
+        .arg("--task-id").arg(task_id)
+        .arg("--repo-root").arg(repo_path)
+        .current_dir(repo_path);
+    cmd.assert().failure();
+}
+
+#[test]
+fn test_validate_sonnet_review_accepts_valid_five_gate() {
+    let repo = create_test_repo();
+    let repo_path = repo.path();
+    let task_id = "task-20260529-001";
+    let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
+    fs::create_dir_all(&task_dir).unwrap();
+
+    let review = make_valid_sonnet_review(task_id, "approve");
+    fs::write(task_dir.join("sonnet_review.json"), serde_json::to_string_pretty(&review).unwrap()).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("validate-sonnet-review")
+        .arg("--task-id").arg(task_id)
+        .arg("--repo-root").arg(repo_path)
+        .current_dir(repo_path);
+    cmd.assert().success();
+}
+
+#[test]
+fn test_validate_sonnet_review_rejects_wrong_gate_order() {
+    let repo = create_test_repo();
+    let repo_path = repo.path();
+    let task_id = "task-20260529-001";
+    let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
+    fs::create_dir_all(&task_dir).unwrap();
+
+    let bad_review = serde_json::json!({
+        "schema_version": "sonnet-review-v1",
+        "task_id": task_id,
+        "review_order_verified": true,
+        "gates": [
+            { "gate": "evidence_validity", "passed": true, "notes": "ok" },
+            { "gate": "scope_policy", "passed": true, "notes": "ok" },
+            { "gate": "merge_recommendation", "passed": true, "notes": "wrong position" },
+            { "gate": "verification", "passed": true, "notes": "wrong position" },
+            { "gate": "diff_code_review", "passed": true, "notes": "ok" }
+        ],
+        "merge": "approve",
+        "summary": "wrong gate order"
+    });
+    fs::write(task_dir.join("sonnet_review.json"), serde_json::to_string_pretty(&bad_review).unwrap()).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("validate-sonnet-review")
+        .arg("--task-id").arg(task_id)
+        .arg("--repo-root").arg(repo_path)
+        .current_dir(repo_path);
+    cmd.assert().failure();
+}
+
+#[test]
+fn test_validate_sonnet_review_rejects_missing_gates() {
+    let repo = create_test_repo();
+    let repo_path = repo.path();
+    let task_id = "task-20260529-001";
+    let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
+    fs::create_dir_all(&task_dir).unwrap();
+
+    let partial_review = serde_json::json!({
+        "schema_version": "sonnet-review-v1",
+        "task_id": task_id,
+        "gates": [
+            { "gate": "evidence_validity", "passed": true, "notes": "ok" },
+            { "gate": "scope_policy", "passed": true, "notes": "ok" },
+            { "gate": "verification", "passed": true, "notes": "ok" }
+        ],
+        "merge": "approve"
+    });
+    fs::write(task_dir.join("sonnet_review.json"), serde_json::to_string_pretty(&partial_review).unwrap()).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("validate-sonnet-review")
+        .arg("--task-id").arg(task_id)
+        .arg("--repo-root").arg(repo_path)
+        .current_dir(repo_path);
+    cmd.assert().failure();
+}
+
+#[test]
+fn test_validate_sonnet_review_rejects_invalid_schema_version() {
+    let repo = create_test_repo();
+    let repo_path = repo.path();
+    let task_id = "task-20260529-001";
+    let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
+    fs::create_dir_all(&task_dir).unwrap();
+
+    let bad_version = serde_json::json!({
+        "schema_version": "sonnet-review-v99",
+        "task_id": task_id,
+        "gates": [
+            { "gate": "evidence_validity", "passed": true, "notes": "" },
+            { "gate": "scope_policy", "passed": true, "notes": "" },
+            { "gate": "verification", "passed": true, "notes": "" },
+            { "gate": "diff_code_review", "passed": true, "notes": "" },
+            { "gate": "merge_recommendation", "passed": true, "notes": "", "recommendation": "approve" }
+        ],
+        "merge": "approve"
+    });
+    fs::write(task_dir.join("sonnet_review.json"), serde_json::to_string_pretty(&bad_version).unwrap()).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("validate-sonnet-review")
+        .arg("--task-id").arg(task_id)
+        .arg("--repo-root").arg(repo_path)
+        .current_dir(repo_path);
+    cmd.assert().failure();
+}
+
+#[test]
+fn test_validate_sonnet_review_accepts_merge_reject() {
+    let repo = create_test_repo();
+    let repo_path = repo.path();
+    let task_id = "task-20260529-001";
+    let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
+    fs::create_dir_all(&task_dir).unwrap();
+
+    let review = make_valid_sonnet_review(task_id, "reject");
+    fs::write(task_dir.join("sonnet_review.json"), serde_json::to_string_pretty(&review).unwrap()).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("validate-sonnet-review")
+        .arg("--task-id").arg(task_id)
+        .arg("--repo-root").arg(repo_path)
+        .current_dir(repo_path);
+    cmd.assert().success();
+}
+
+#[test]
+fn test_validate_sonnet_review_accepts_path_argument() {
+    let repo = create_test_repo();
+    let repo_path = repo.path();
+    let task_id = "task-20260529-001";
+    let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
+    fs::create_dir_all(&task_dir).unwrap();
+
+    let review = make_valid_sonnet_review(task_id, "approve");
+    fs::write(task_dir.join("sonnet_review.json"), serde_json::to_string_pretty(&review).unwrap()).unwrap();
+
+    let review_path = task_dir.join("sonnet_review.json");
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("validate-sonnet-review")
+        .arg("--path").arg(&review_path)
+        .current_dir(repo_path);
+    cmd.assert().success();
+}
+
+#[test]
+fn test_agent_review_end_to_end_produces_valid_review() {
+    // This test validates the full /agent-review integration path:
+    // init-run -> normalized artifacts exist -> sonnet_review.json written
+    // -> validate-sonnet-review accepts it.
+    // Note: validate-evidence is a precondition for the /agent-review slash command
+    // in the real workflow, but we test validate-sonnet-review in isolation here.
+    let (temp, _plan_id, _contract_id) = create_test_repo_with_approved_contract();
+    let repo_path = temp.path();
+    let task_id = "task-20260529-010";
+
+    Command::cargo_bin("agent_loop").unwrap()
+        .arg("init-run").arg("--plan-id").arg("plan-20260529-001")
+        .arg("--contract-id").arg("contract-001").arg("--task-id").arg(task_id)
+        .arg("--repo-root").arg(repo_path).current_dir(repo_path)
+        .assert().success();
+
+    let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
+    let review = make_valid_sonnet_review(task_id, "approve");
+    fs::write(task_dir.join("sonnet_review.json"), serde_json::to_string_pretty(&review).unwrap()).unwrap();
+
+    Command::cargo_bin("agent_loop").unwrap()
+        .arg("validate-sonnet-review").arg("--task-id").arg(task_id)
+        .arg("--repo-root").arg(repo_path).current_dir(repo_path)
+        .assert().success();
+
+    let content = fs::read_to_string(task_dir.join("sonnet_review.json")).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(parsed["schema_version"], "sonnet-review-v1");
+    assert_eq!(parsed["task_id"], task_id);
+    assert!(parsed["gates"].is_array());
+    assert_eq!(parsed["gates"].as_array().unwrap().len(), 5);
+}

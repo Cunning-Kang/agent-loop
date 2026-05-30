@@ -483,3 +483,48 @@ pub const FINAL_EVIDENCE_SCHEMA: &str = r#"{
  },
  "additionalProperties": true
 }"#;
+
+/// Sonnet review schema version
+pub const SONNET_REVIEW_SCHEMA: &str = r#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "sonnet_review",
+  "type": "object",
+  "required": ["schema_version", "task_id", "gates", "merge"],
+  "properties": {
+    "schema_version": { "type": "string", "enum": ["sonnet-review-v1"] },
+    "task_id": {
+      "type": "string",
+      "pattern": "^task-[0-9]{8}-[0-9]{3}$"
+    },
+    "review_order_verified": { "type": "boolean" },
+    "gates": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "required": ["gate", "passed", "notes"],
+        "properties": {
+          "gate": {
+            "type": "string",
+            "enum": [
+              "evidence_validity",
+              "scope_policy",
+              "verification",
+              "diff_code_review",
+              "merge_recommendation"
+            ]
+          },
+          "passed": { "type": "boolean" },
+          "notes": { "type": "string" },
+          "recommendation": { "type": "string" }
+        }
+      }
+    },
+    "merge": {
+      "type": "string",
+      "enum": ["approve", "reject", "request_repair"]
+    },
+    "summary": { "type": "string" }
+  }
+}"#;
