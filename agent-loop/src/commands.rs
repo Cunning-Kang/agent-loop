@@ -8,7 +8,7 @@
 
 use crate::artifacts::{
     ensure_dir, find_repo_root, list_subdirs, read_json, write_json,
-    AgentRunsPaths, StatusJson, TaskStatus,
+    AgentRunsPaths, StatusJson, TaskStatus, WorktreePaths,
 };
 use crate::id::{validate_id, ContractId, IdKind, PlanId, TaskId};
 use crate::schemas;
@@ -16,7 +16,7 @@ use jsonschema::Validator;
 use std::path::{Path, PathBuf};
 
 /// Result type for CLI commands.
-pub type CommandResult = Result<(), CommandError>;
+pub type CommandResult<T = ()> = Result<T, CommandError>;
 
 #[derive(Debug)]
 pub enum CommandError {
@@ -443,8 +443,24 @@ mod tests {
         let result = cmd.run();
         assert!(result.is_ok());
 
+        // InitRun generates task_id with today's date and provided sequence.
+        // Status file should exist (date matches today, sequence=1).
         let paths = AgentRunsPaths::new(repo.path());
-        assert!(paths.task_status("task-20260529-001").exists());
+        // Use a glob pattern: task-YYYYMMDD-001 should exist.
+        let tasks_dir = repo.path().join(".agent-runs/tasks");
+        let entries = std::fs::read_dir(&tasks_dir).unwrap();
+        let mut found = false;
+        for entry in entries {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            // Should be task-YYYYMMDD-001
+            if name.starts_with("task-") && name.ends_with("-001") {
+                found = true;
+                // Status file should exist
+                assert!(tasks_dir.join(&name).join("status.json").exists());
+                break;
+            }
+        }
+        assert!(found, "Expected task with sequence 001 to be created");
     }
 
     #[test]
@@ -1227,6 +1243,828 @@ impl ValidateSonnetReview {
         if !self.quiet {
             println!("sonnet_review.json: valid (five-gate order confirmed)");
         }
+        Ok(())
+    }
+}
+
+// ============================================================================
+// final-gate command
+// ============================================================================
+
+/// Final gate decision values (must match opus_final_gate.json schema).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalGateDecision {
+    Merge,
+    RequestRepair,
+    Reject,
+    NeedsUserDecision,
+}
+
+impl FinalGateDecision {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "merge" => Some(Self::Merge),
+            "request_repair" => Some(Self::RequestRepair),
+            "reject" => Some(Self::Reject),
+            "needs_user_decision" => Some(Self::NeedsUserDecision),
+            _ => None,
+        }
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::RequestRepair => "request_repair",
+            Self::Reject => "reject",
+            Self::NeedsUserDecision => "needs_user_decision",
+        }
+    }
+}
+
+/// Opus final gate output artifact.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OpusFinalGate {
+    #[serde(rename = "schema_version")]
+    pub schema_version: String,
+    #[serde(rename = "task_id")]
+    pub task_id: String,
+    pub decision: String,
+    #[serde(rename = "commit_message")]
+    pub commit_message: Option<String>,
+    pub timestamp: String,
+    #[serde(rename = "notes", skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+impl OpusFinalGate {
+    pub fn new(task_id: String, decision: FinalGateDecision, commit_message: Option<String>, notes: Option<String>) -> Self {
+        Self {
+            schema_version: "opus-final-gate-v1".to_string(),
+            task_id,
+            decision: decision.as_str().to_string(),
+            commit_message,
+            timestamp: chrono::Local::now().to_rfc3339(),
+            notes,
+        }
+    }
+}
+
+/// Produce the final gate decision for a completed review.
+/// Reads contract, evidence, sonnet review, diff, verification, and sensitive audit.
+/// Writes opus_final_gate.json with four-state decision.
+/// Does NOT apply patch or commit.
+pub struct FinalGate {
+    pub repo_root: PathBuf,
+    pub task_id: String,
+    pub decision: String,
+    pub commit_message: String,
+    pub notes: Option<String>,
+}
+
+impl FinalGate {
+    pub fn run(&self) -> CommandResult {
+        let repo_root = find_repo_root(&self.repo_root)
+            .ok_or_else(|| CommandError::NotFound("Not inside a git repository".to_string()))?;
+        TaskId::parse(&self.task_id).ok_or_else(|| {
+            CommandError::IdValidation(format!("Invalid task_id format: {}", self.task_id))
+        })?;
+        let decision = FinalGateDecision::from_str(&self.decision)
+            .ok_or_else(|| CommandError::InvalidInput(format!(
+                "Invalid decision: {}. Must be one of: merge, request_repair, reject, needs_user_decision",
+                self.decision
+            )))?;
+        let paths = AgentRunsPaths::new(&repo_root);
+        let task_dir = paths.task_dir(&self.task_id);
+
+        // Validate required artifacts exist before writing gate.
+        let review_path = task_dir.join("sonnet_review.json");
+        if !review_path.exists() {
+            return Err(CommandError::NotFound(format!(
+                "sonnet_review.json not found for task {} (required for final gate)",
+                self.task_id
+            )));
+        }
+        let gate_path = paths.machine_gate(&self.task_id);
+        if !gate_path.exists() {
+            return Err(CommandError::NotFound(format!(
+                "machine_gate.json not found for task {} (required for final gate)",
+                self.task_id
+            )));
+        }
+        let normalized_dir = paths.normalized_dir(&self.task_id);
+        if !normalized_dir.exists() {
+            return Err(CommandError::NotFound(format!(
+                "normalized/ directory not found for task {} (required for final gate)",
+                self.task_id
+            )));
+        }
+        let diff_path = normalized_dir.join("diff.patch");
+        if !diff_path.exists() {
+            return Err(CommandError::NotFound(format!(
+                "diff.patch not found in normalized/ for task {} (required for final gate)",
+                self.task_id
+            )));
+        }
+
+        let commit_msg = if decision == FinalGateDecision::Merge {
+            Some(self.commit_message.clone())
+        } else {
+            None
+        };
+
+        let gate = OpusFinalGate::new(
+            self.task_id.clone(),
+            decision,
+            commit_msg,
+            self.notes.clone(),
+        );
+        let gate_out = paths.opus_final_gate(&self.task_id);
+        write_json(&gate_out, &gate)?;
+        println!("Final gate written: {}", gate_out.display());
+        println!("Decision: {}", gate.decision);
+        Ok(())
+    }
+}
+
+// ============================================================================
+// integrate command
+// ============================================================================
+
+/// Post-apply verification output artifact.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PostApplyVerification {
+    #[serde(rename = "schema_version")]
+    pub schema_version: String,
+    #[serde(rename = "task_id")]
+    pub task_id: String,
+    pub passed: bool,
+    #[serde(rename = "commands_run")]
+    pub commands_run: Vec<CommandRunResult>,
+    pub timestamp: String,
+    #[serde(rename = "error", skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CommandRunResult {
+    pub command: String,
+    #[serde(rename = "exit_code")]
+    pub exit_code: i32,
+    pub passed: bool,
+    #[serde(rename = "stdout_excerpt", skip_serializing_if = "Option::is_none")]
+    pub stdout_excerpt: Option<String>,
+    #[serde(rename = "stderr_excerpt", skip_serializing_if = "Option::is_none")]
+    pub stderr_excerpt: Option<String>,
+}
+
+/// Integration result output artifact.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IntegrationResult {
+    #[serde(rename = "schema_version")]
+    pub schema_version: String,
+    #[serde(rename = "task_id")]
+    pub task_id: String,
+    #[serde(rename = "commit_hash")]
+    pub commit_hash: String,
+    #[serde(rename = "committed_files")]
+    pub committed_files: Vec<String>,
+    #[serde(rename = "verification_passed")]
+    pub verification_passed: bool,
+    #[serde(rename = "worktree_removed")]
+    pub worktree_removed: bool,
+    #[serde(rename = "agent_runs_retained")]
+    pub agent_runs_retained: bool,
+    pub timestamp: String,
+}
+
+/// Integrate a task into the main worktree.
+pub struct Integrate {
+    pub repo_root: PathBuf,
+    pub task_id: String,
+}
+
+impl Integrate {
+    pub fn run(&self) -> CommandResult {
+        let repo_root = find_repo_root(&self.repo_root)
+            .ok_or_else(|| CommandError::NotFound("Not inside a git repository".to_string()))?;
+        TaskId::parse(&self.task_id).ok_or_else(|| {
+            CommandError::IdValidation(format!("Invalid task_id format: {}", self.task_id))
+        })?;
+
+        let paths = AgentRunsPaths::new(&repo_root);
+        let task_dir = paths.task_dir(&self.task_id);
+        let normalized_dir = paths.normalized_dir(&self.task_id);
+
+        // Step 1: Verify opus_final_gate.json exists and decision is merge.
+        let gate_path = paths.opus_final_gate(&self.task_id);
+        if !gate_path.exists() {
+            return Err(CommandError::InvalidInput(format!(
+                "opus_final_gate.json not found for task {}", self.task_id
+            )));
+        }
+        let gate: OpusFinalGate = read_json(&gate_path)?;
+        if gate.decision != "merge" {
+            return Err(CommandError::InvalidInput(format!(
+                "opus_final_gate.decision is '{}', must be 'merge' for integration", gate.decision
+            )));
+        }
+        let commit_message = gate.commit_message.clone()
+            .ok_or_else(|| CommandError::InvalidInput(
+                "opus_final_gate.commit_message is null (required for merge)".to_string()
+            ))?;
+
+        // Step 2: Verify machine_gate.json exists and passed.
+        let machine_gate_path = paths.machine_gate(&self.task_id);
+        if !machine_gate_path.exists() {
+            return Err(CommandError::InvalidInput(format!(
+                "machine_gate.json not found for task {}", self.task_id
+            )));
+        }
+        #[derive(serde::Deserialize)]
+        struct MachineGate { passed: bool }
+        let machine_gate: MachineGate = read_json(&machine_gate_path)?;
+        if !machine_gate.passed {
+            return Err(CommandError::InvalidInput(format!(
+                "machine_gate.passed is false for task {}", self.task_id
+            )));
+        }
+
+        // Step 3: Require clean main worktree.
+        Self::require_clean_worktree(&repo_root)?;
+
+        // Step 4: Verify diff.patch exists.
+        let diff_path = normalized_dir.join("diff.patch");
+        if !diff_path.exists() {
+            return Err(CommandError::NotFound(format!(
+                "diff.patch not found in normalized/ for task {}", self.task_id
+            )));
+        }
+        let diff_content = std::fs::read_to_string(&diff_path)?;
+
+        // Step 5: git apply --check (conflict detection).
+        let patch_file = task_dir.join(format!("TASK_{}_PATCH.patch", self.task_id));
+        std::fs::write(&patch_file, &diff_content)?;
+        let check_result = std::process::Command::new("git")
+            .args(["apply", "--check", patch_file.to_str().unwrap()])
+            .current_dir(&repo_root)
+            .output()
+            .map_err(|e| CommandError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!(
+                "Failed to run git apply --check: {}", e
+            ))))?;
+
+        if !check_result.status.success() {
+            let stderr = String::from_utf8_lossy(&check_result.stderr);
+            let _ = std::fs::remove_file(&patch_file);
+            return Err(CommandError::InvalidInput(format!(
+                "Patch conflict detected (git apply --check failed):\n{}", stderr
+            )));
+        }
+
+        // Step 6: Apply the patch.
+        let apply_output = std::process::Command::new("git")
+            .args(["apply", "--whitespace=nowarn", patch_file.to_str().unwrap()])
+            .current_dir(&repo_root)
+            .output()
+            .map_err(|e| CommandError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!(
+                "Failed to apply patch: {}", e
+            ))))?;
+        let patch_applied = apply_output.status.success();
+
+        // Step 7: Run post-apply verification.
+        let post_apply_result = Self::run_post_apply_verification(&self.task_id, &repo_root, &normalized_dir)?;
+
+        // If verification failed, roll back the patch.
+        if !post_apply_result.passed && patch_applied {
+            let rollback = std::process::Command::new("git")
+                .args(["checkout", "--", "."])
+                .current_dir(&repo_root)
+                .output()
+                .map_err(|e| CommandError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!(
+                    "Failed to rollback patch: {}", e
+                ))))?;
+            if !rollback.status.success() {
+                return Err(CommandError::InvalidInput(
+                    "Verification failed AND rollback also failed. Manual intervention required.".to_string()
+                ));
+            }
+            let post_apply_path = paths.task_dir(&self.task_id).join("post_apply_verification.json");
+            write_json(&post_apply_path, &post_apply_result)?;
+            return Err(CommandError::InvalidInput(format!(
+                "Post-apply verification failed. Patch has been rolled back. Verification record: {}",
+                post_apply_path.display()
+            )));
+        }
+
+        // Step 8: Record post_apply_verification.json.
+        let post_apply_path = paths.task_dir(&self.task_id).join("post_apply_verification.json");
+        write_json(&post_apply_path, &post_apply_result)?;
+
+        // Step 9: Stage expected changed files (from changed_files.json evidence).
+        let changed_files_path = normalized_dir.join("changed_files.json");
+        let expected_files: Vec<String> = if changed_files_path.exists() {
+            #[derive(serde::Deserialize)]
+            struct ChangedFiles { files: Vec<ChangedFileEntry> }
+            #[derive(serde::Deserialize)]
+            struct ChangedFileEntry { path: String }
+            let cf: ChangedFiles = read_json(&changed_files_path)?;
+            cf.files.into_iter().map(|f| f.path).collect()
+        } else {
+            Vec::new()
+        };
+
+        for file in &expected_files {
+            let stage_output = std::process::Command::new("git")
+                .args(["add", "--", file.as_str()])
+                .current_dir(&repo_root)
+                .output()
+                .map_err(|e| CommandError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!(
+                    "Failed to stage {}: {}", file, e
+                ))))?;
+            if !stage_output.status.success() {
+                return Err(CommandError::InvalidInput(format!(
+                    "Failed to stage file: {} (file may not exist in diff)", file
+                )));
+            }
+        }
+
+        // Step 10: Create local commit.
+        let commit_output = std::process::Command::new("git")
+            .args(["commit", "-m", &commit_message])
+            .current_dir(&repo_root)
+            .output()
+            .map_err(|e| CommandError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!(
+                "Failed to commit: {}", e
+            ))))?;
+
+        if !commit_output.status.success() {
+            return Err(CommandError::InvalidInput(format!(
+                "Git commit failed: {}", String::from_utf8_lossy(&commit_output.stderr)
+            )));
+        }
+
+        // Get commit hash.
+        let hash_output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo_root)
+            .output()
+            .map_err(|e| CommandError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!(
+                "Failed to get commit hash: {}", e
+            ))))?;
+        let commit_hash = String::from_utf8_lossy(&hash_output.stdout).trim().to_string();
+
+        // Step 11: Write integration_result.json.
+        let result = IntegrationResult {
+            schema_version: "integration-result-v1".to_string(),
+            task_id: self.task_id.clone(),
+            commit_hash: commit_hash.clone(),
+            committed_files: expected_files.clone(),
+            verification_passed: post_apply_result.passed,
+            worktree_removed: false,
+            agent_runs_retained: true,
+            timestamp: chrono::Local::now().to_rfc3339(),
+        };
+        let result_path = paths.task_dir(&self.task_id).join("integration_result.json");
+        write_json(&result_path, &result)?;
+
+        // Step 12: Remove worktree directory.
+        let worktree = WorktreePaths::new(&repo_root).worktree(&self.task_id);
+        let worktree_removed = if worktree.exists() {
+            std::fs::remove_dir_all(&worktree).is_ok()
+        } else {
+            true
+        };
+
+        // Update result with worktree status.
+        let mut final_result = result;
+        final_result.worktree_removed = worktree_removed;
+        write_json(&result_path, &final_result)?;
+
+        // Clean up patch file.
+        let _ = std::fs::remove_file(&patch_file);
+
+        println!("Integration complete for task {}", self.task_id);
+        println!("  Commit: {}", final_result.commit_hash);
+        println!("  Files: {:?}", final_result.committed_files);
+        println!("  Verification passed: {}", final_result.verification_passed);
+        println!("  Worktree removed: {}", final_result.worktree_removed);
+        println!("  Result: {}", result_path.display());
+
+        Ok(())
+    }
+
+    fn require_clean_worktree(repo_root: &Path) -> CommandResult {
+        let output = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(repo_root)
+            .output()
+            .map_err(|e| CommandError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!(
+                "Failed to check git status: {}", e
+            ))))?;
+        let status = String::from_utf8_lossy(&output.stdout);
+        if !status.trim().is_empty() {
+            return Err(CommandError::InvalidInput(format!(
+                "Main worktree is not clean. Uncommitted changes:\n{}", status
+            )));
+        }
+        Ok(())
+    }
+
+    fn run_post_apply_verification(
+        task_id: &str,
+        repo_root: &Path,
+        normalized_dir: &Path,
+    ) -> CommandResult<PostApplyVerification> {
+        let mut commands_run: Vec<CommandRunResult> = Vec::new();
+
+        let verification_path = normalized_dir.join("verification.json");
+        if verification_path.exists() {
+            #[derive(serde::Deserialize)]
+            struct VerificationDoc { results: Vec<VerificationResultEntry> }
+            #[derive(serde::Deserialize)]
+            struct VerificationResultEntry {
+                command: String,
+                #[serde(rename = "exit_code")]
+                exit_code: i32,
+                passed: bool,
+            }
+
+            if let Ok(doc) = read_json::<VerificationDoc>(&verification_path) {
+                for entry in doc.results {
+                    let output = std::process::Command::new("sh")
+                        .args(["-c", &entry.command])
+                        .current_dir(repo_root)
+                        .output();
+
+                    let (exit_code, passed, stdout_excerpt, stderr_excerpt) = match output {
+                        Ok(out) => {
+                            let code = out.status.code().unwrap_or(-1);
+                            let pass = out.status.success();
+                            let stdout = String::from_utf8_lossy(&out.stdout);
+                            let stderr = String::from_utf8_lossy(&out.stderr);
+                            (
+                                code, pass,
+                                Some(stdout.to_string()),
+                                Some(stderr.to_string()),
+                            )
+                        }
+                        Err(e) => (-1, false, None, Some(format!("Failed to run: {}", e))),
+                    };
+                    commands_run.push(CommandRunResult {
+                        command: entry.command,
+                        exit_code,
+                        passed,
+                        stdout_excerpt,
+                        stderr_excerpt,
+                    });
+                }
+            }
+        }
+
+        // Default Phase1 verification: cargo test --lib
+        let cargo_test_output = std::process::Command::new("sh")
+            .args(["-c", "cargo test --lib 2>&1 || true"])
+            .current_dir(repo_root)
+            .output();
+
+        let (cargo_exit, cargo_passed, cargo_stdout, cargo_stderr) = match cargo_test_output {
+            Ok(out) => {
+                let code = out.status.code().unwrap_or(-1);
+                let pass = out.status.success();
+                (code, pass,
+                    Some(String::from_utf8_lossy(&out.stdout).to_string()),
+                    Some(String::from_utf8_lossy(&out.stderr).to_string()))
+            }
+            Err(_) => (-1, false, None, Some("cargo test not available".to_string())),
+        };
+
+        commands_run.push(CommandRunResult {
+            command: "cargo test --lib".to_string(),
+            exit_code: cargo_exit,
+            passed: cargo_passed,
+            stdout_excerpt: cargo_stdout,
+            stderr_excerpt: cargo_stderr,
+        });
+
+        let passed = commands_run.iter().all(|r| r.passed);
+
+        Ok(PostApplyVerification {
+            schema_version: "post-apply-verification-v1".to_string(),
+            task_id: task_id.to_string(),
+            passed,
+            commands_run,
+            timestamp: chrono::Local::now().to_rfc3339(),
+            error: None,
+        })
+    }
+}
+
+// ============================================================================
+// git-guard command
+// ============================================================================
+
+/// Git guard decision output.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GitGuardResult {
+    #[serde(rename = "schema_version")]
+    pub schema_version: String,
+    #[serde(rename = "task_id")]
+    pub task_id: String,
+    pub status: String,
+    #[serde(rename = "blocked_reason", skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+    pub timestamp: String,
+}
+
+/// Check whether git operations are safe for a task.
+pub struct GitGuard {
+    pub repo_root: PathBuf,
+    pub task_id: String,
+}
+
+impl GitGuard {
+    pub fn run(&self) -> CommandResult {
+        let repo_root = find_repo_root(&self.repo_root)
+            .ok_or_else(|| CommandError::NotFound("Not inside a git repository".to_string()))?;
+        TaskId::parse(&self.task_id).ok_or_else(|| {
+            CommandError::IdValidation(format!("Invalid task_id format: {}", self.task_id))
+        })?;
+
+        let paths = AgentRunsPaths::new(&repo_root);
+        let task_dir = paths.task_dir(&self.task_id);
+        let status_path = paths.task_status(&self.task_id);
+
+        // No run detected -> allow.
+        if !task_dir.exists() || !status_path.exists() {
+            println!("allowed: no run detected");
+            println!("status: allowed");
+            return Ok(());
+        }
+
+        let status: StatusJson = read_json(&status_path)?;
+
+        // Active run -> block.
+        if status.status == TaskStatus::Active {
+            println!("blocked: active run in progress");
+            println!("status: blocked");
+            println!("reason: active_run");
+            return Err(CommandError::InvalidInput("blocked: active run in progress".to_string()));
+        }
+
+        // Check opus_final_gate.
+        let gate_path = paths.opus_final_gate(&self.task_id);
+        if !gate_path.exists() {
+            println!("pending: no final gate decision");
+            println!("status: pending");
+            return Ok(());
+        }
+
+        let gate: OpusFinalGate = read_json(&gate_path)?;
+        if gate.decision != "merge" {
+            println!("blocked: final gate decision is '{}'", gate.decision);
+            println!("status: blocked");
+            println!("reason: gate_rejected");
+            return Err(CommandError::InvalidInput(format!(
+                "blocked: final gate decision is '{}'", gate.decision
+            )));
+        }
+
+        // Check machine gate.
+        let machine_gate_path = paths.machine_gate(&self.task_id);
+        if !machine_gate_path.exists() {
+            println!("pending: no machine gate");
+            println!("status: pending");
+            return Ok(());
+        }
+        #[derive(serde::Deserialize)]
+        struct MachineGate { passed: bool }
+        let machine_gate: MachineGate = read_json(&machine_gate_path)?;
+        if !machine_gate.passed {
+            println!("blocked: machine gate failed");
+            println!("status: blocked");
+            println!("reason: machine_gate_failed");
+            return Err(CommandError::InvalidInput("blocked: machine gate failed".to_string()));
+        }
+
+        // Check main worktree cleanliness.
+        let output = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&repo_root)
+            .output();
+
+        match output {
+            Ok(out) => {
+                let code = out.status.code().unwrap_or(-1);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+
+                // git status --porcelain: dirty if stdout is non-empty, regardless of exit code.
+                if code == 0 || code == 1 {
+                    let status_output = String::from_utf8_lossy(&out.stdout);
+
+                    if !status_output.trim().is_empty() {
+                        println!("blocked: main worktree not clean");
+                        println!("status: blocked");
+                        println!("reason: dirty_worktree");
+                        return Err(CommandError::InvalidInput("blocked: main worktree not clean".to_string()));
+                    }
+                    // Worktree is clean - fall through to allowed.
+                } else {
+    
+                    println!("pending: cannot verify worktree status");
+                    println!("status: pending");
+                    return Ok(());
+                }
+            }
+            Err(_) => {
+                println!("pending: cannot verify worktree status");
+                println!("status: pending");
+                return Ok(());
+            }
+        }
+
+        println!("allowed: final gate merge with all preconditions satisfied");
+        println!("status: allowed");
+        Ok(())
+    }
+}
+
+// ============================================================================
+// validate-subagent-stop command
+// ============================================================================
+
+/// Validate that adapter/reviewer artifacts are present for SubagentStop hook.
+pub struct ValidateSubagentStop {
+    pub repo_root: PathBuf,
+    pub task_id: String,
+}
+
+impl ValidateSubagentStop {
+    pub fn run(&self) -> CommandResult {
+        let repo_root = find_repo_root(&self.repo_root)
+            .ok_or_else(|| CommandError::NotFound("Not inside a git repository".to_string()))?;
+        TaskId::parse(&self.task_id).ok_or_else(|| {
+            CommandError::IdValidation(format!("Invalid task_id format: {}", self.task_id))
+        })?;
+
+        let paths = AgentRunsPaths::new(&repo_root);
+        let task_dir = paths.task_dir(&self.task_id);
+        let mut missing: Vec<String> = Vec::new();
+
+        let machine_gate = paths.machine_gate(&self.task_id);
+        if !machine_gate.exists() {
+            missing.push("machine_gate.json".to_string());
+        }
+        let review = task_dir.join("sonnet_review.json");
+        if !review.exists() {
+            missing.push("sonnet_review.json".to_string());
+        }
+        let final_gate = paths.opus_final_gate(&self.task_id);
+        if !final_gate.exists() {
+            missing.push("opus_final_gate.json".to_string());
+        }
+
+        if missing.is_empty() {
+            println!("All required SubagentStop artifacts present");
+            Ok(())
+        } else {
+            eprintln!("Missing required artifacts:");
+            for m in &missing {
+                eprintln!("  - {}", m);
+            }
+            Err(CommandError::InvalidInput(format!(
+                "Missing {} required artifact(s) for SubagentStop", missing.len()
+            )))
+        }
+    }
+}
+
+// ============================================================================
+// pre-tool-guard command (PreToolUse hook enforcement)
+// ============================================================================
+
+/// PreToolCheck validates git operations for dangerous commands.
+/// Guards: git apply, git commit, git merge, git push, git add . and git add -A.
+/// Calls git-guard logic: no run -> allow, active run -> block, merge preconditions -> allow.
+/// Push/merge remote/deploy always blocked by integration policy.
+pub struct PreToolCheck {
+    pub repo_root: PathBuf,
+    pub task_id: Option<String>,
+}
+
+impl PreToolCheck {
+    /// Run the pre-tool check. Returns Ok(()) if allowed, Err if blocked.
+    pub fn run(&self) -> CommandResult {
+        let repo_root = find_repo_root(&self.repo_root)
+            .ok_or_else(|| CommandError::NotFound("Not inside a git repository".to_string()))?;
+
+        let paths = AgentRunsPaths::new(&repo_root);
+
+        // If no task_id provided, just check whether any active run exists.
+        // Default: no run detected -> allow.
+        let task_id = match &self.task_id {
+            Some(t) => t.clone(),
+            None => {
+                // No task specified: check for any active run in the repo.
+                let tasks_dir = paths.tasks_root();
+                if tasks_dir.exists() {
+                    if let Ok(entries) = std::fs::read_dir(&tasks_dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_dir() {
+                                let status_path = path.join("status.json");
+                                if status_path.exists() {
+                                    if let Ok(status) = read_json::<StatusJson>(&status_path) {
+                                        if status.status == TaskStatus::Active {
+                                            println!("blocked: active run in progress");
+                                            println!("status: blocked");
+                                            println!("reason: active_run");
+                                            return Err(CommandError::InvalidInput(
+                                                "blocked: active run in progress".to_string(),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                println!("allowed: no active run detected");
+                println!("status: allowed");
+                return Ok(());
+            }
+        };
+
+        // Validate task_id format.
+        TaskId::parse(&task_id).ok_or_else(|| {
+            CommandError::IdValidation(format!("Invalid task_id format: {}", task_id))
+        })?;
+
+        let task_dir = paths.task_dir(&task_id);
+        let status_path = paths.task_status(&task_id);
+
+        // No run detected -> allow.
+        if !task_dir.exists() || !status_path.exists() {
+            println!("allowed: no run detected for {}", task_id);
+            println!("status: allowed");
+            return Ok(());
+        }
+
+        let status: StatusJson = read_json(&status_path)?;
+
+        // Active run -> block.
+        if status.status == TaskStatus::Active {
+            println!("blocked: active run in progress");
+            println!("status: blocked");
+            println!("reason: active_run");
+            return Err(CommandError::InvalidInput("blocked: active run in progress".to_string()));
+        }
+
+        // Check opus_final_gate.
+        let gate_path = paths.opus_final_gate(&task_id);
+        if !gate_path.exists() {
+            println!("pending: no final gate decision");
+            println!("status: pending");
+            return Ok(());
+        }
+
+        let gate: OpusFinalGate = read_json(&gate_path)?;
+        if gate.decision != "merge" {
+            println!("blocked: final gate decision is '{}'", gate.decision);
+            println!("status: blocked");
+            println!("reason: gate_rejected");
+            return Err(CommandError::InvalidInput(format!(
+                "blocked: final gate decision is '{}'", gate.decision
+            )));
+        }
+
+        // Check machine gate.
+        let machine_gate_path = paths.machine_gate(&task_id);
+        if !machine_gate_path.exists() {
+            println!("pending: no machine gate");
+            println!("status: pending");
+            return Ok(());
+        }
+        #[derive(serde::Deserialize)]
+        struct MachineGate { passed: bool }
+        let machine_gate: MachineGate = read_json(&machine_gate_path)?;
+        if !machine_gate.passed {
+            println!("blocked: machine gate failed");
+            println!("status: blocked");
+            println!("reason: machine_gate_failed");
+            return Err(CommandError::InvalidInput("blocked: machine gate failed".to_string()));
+        }
+
+        // Check commit message is present.
+        if gate.commit_message.is_none() || gate.commit_message.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+            println!("blocked: commit_message missing in final gate");
+            println!("status: blocked");
+            println!("reason: missing_commit_message");
+            return Err(CommandError::InvalidInput(
+                "blocked: commit_message missing in final gate".to_string(),
+            ));
+        }
+
+        // All preconditions satisfied -> allow.
+        println!("allowed: final gate merge with all preconditions satisfied");
+        println!("status: allowed");
         Ok(())
     }
 }

@@ -528,3 +528,82 @@ pub const SONNET_REVIEW_SCHEMA: &str = r#"{
     "summary": { "type": "string" }
   }
 }"#;
+/// Opus final gate schema version — four-state decision.
+pub const OPUS_FINAL_GATE_SCHEMA: &str = r#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "opus_final_gate",
+  "type": "object",
+  "required": ["schema_version", "task_id", "decision", "commit_message", "timestamp"],
+  "properties": {
+    "schema_version": { "type": "string", "enum": ["opus-final-gate-v1"] },
+    "task_id": {
+      "type": "string",
+      "pattern": "^task-[0-9]{8}-[0-9]{3}$"
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["merge", "request_repair", "reject", "needs_user_decision"]
+    },
+    "commit_message": {
+      "type": ["string", "null"]
+    },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "notes": {
+      "type": ["string", "null"]
+    }
+  }
+}"#;
+/// Post-apply verification schema version.
+pub const POST_APPLY_VERIFICATION_SCHEMA: &str = r#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "post_apply_verification",
+  "type": "object",
+  "required": ["schema_version", "task_id", "passed", "commands_run", "timestamp"],
+  "properties": {
+    "schema_version": { "type": "string", "enum": ["post-apply-verification-v1"] },
+    "task_id": {
+      "type": "string",
+      "pattern": "^task-[0-9]{8}-[0-9]{3}$"
+    },
+    "passed": { "type": "boolean" },
+    "commands_run": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["command", "exit_code", "passed"],
+        "properties": {
+          "command": { "type": "string" },
+          "exit_code": { "type": "integer" },
+          "passed": { "type": "boolean" },
+          "stdout_excerpt": { "type": ["string", "null"] },
+          "stderr_excerpt": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "error": { "type": ["string", "null"] }
+  }
+}"#;
+/// Integration result schema version.
+pub const INTEGRATION_RESULT_SCHEMA: &str = r#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "integration_result",
+  "type": "object",
+  "required": ["schema_version", "task_id", "commit_hash", "committed_files", "timestamp"],
+  "properties": {
+    "schema_version": { "type": "string", "enum": ["integration-result-v1"] },
+    "task_id": {
+      "type": "string",
+      "pattern": "^task-[0-9]{8}-[0-9]{3}$"
+    },
+    "commit_hash": { "type": "string", "minLength": 7 },
+    "committed_files": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "verification_passed": { "type": "boolean" },
+    "worktree_removed": { "type": "boolean" },
+    "agent_runs_retained": { "type": "boolean" },
+    "timestamp": { "type": "string", "format": "date-time" }
+  }
+}"#;

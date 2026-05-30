@@ -8,6 +8,10 @@
 //! - collect-evidence: Normalize backend raw outputs into required artifacts
 //! - validate-evidence: Validate normalized evidence artifacts (no semantic judgment)
 //! - validate-sonnet-review: Validate sonnet_review.json against schema and five-gate order
+//! - final-gate: Produce four-state Opus final decision (merge/reject/request_repair/needs_user_decision)
+//! - integrate: Integrate task into main worktree with verification and cleanup
+//! - git-guard: Check whether git operations are safe for a task
+//! - validate-subagent-stop: Validate adapter/reviewer artifacts for SubagentStop hook
 
 mod artifacts;
 mod backend;
@@ -188,6 +192,82 @@ enum Commands {
         #[arg(long, default_value = ".")]
         repo_root: PathBuf,
     },
+
+    /// Produce the final gate decision for a completed review.
+    /// Reads contract, evidence, sonnet review, diff, verification, and sensitive audit.
+    /// Writes opus_final_gate.json with four-state decision.
+    /// Does NOT apply patch or commit.
+    FinalGate {
+        /// Task ID (format: task-YYYYMMDD-NNN)
+        #[arg(long)]
+        task_id: String,
+
+        /// Final decision: merge | request_repair | reject | needs_user_decision
+        #[arg(long)]
+        decision: String,
+
+        /// Commit message to store (only used when decision is merge)
+        #[arg(long)]
+        commit_message: String,
+
+        /// Optional notes about the decision
+        #[arg(long)]
+        notes: Option<String>,
+
+        /// Repository root (default: current directory)
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
+
+    /// Integrate a task into the main worktree: verify gates, apply patch,
+    /// run post-apply verification, stage files, commit, write result, cleanup.
+    /// Requires opus_final_gate.decision=merge and all preconditions satisfied.
+    Integrate {
+        /// Task ID (format: task-YYYYMMDD-NNN)
+        #[arg(long)]
+        task_id: String,
+
+        /// Repository root (default: current directory)
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
+
+    /// Git guard: check whether git operations are safe for a task.
+    /// Returns: allowed | blocked | pending
+    GitGuard {
+        /// Task ID (format: task-YYYYMMDD-NNN)
+        #[arg(long)]
+        task_id: String,
+
+        /// Repository root (default: current directory)
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
+
+    /// Validate that adapter/reviewer artifacts are present for SubagentStop.
+    /// Exits 0 if all required artifacts exist, exits non-zero if missing.
+    ValidateSubagentStop {
+        /// Task ID (format: task-YYYYMMDD-NNN)
+        #[arg(long)]
+        task_id: String,
+
+        /// Repository root (default: current directory)
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
+
+    /// PreToolUse guard: check whether dangerous git operations are allowed.
+    /// Guards: git apply, git commit, git merge, git push, git add . and git add -A.
+    /// Blocks if active run in progress. Allows if no run or merge preconditions satisfied.
+    PreToolGuard {
+        /// Task ID (format: task-YYYYMMDD-NNN). Optional.
+        #[arg(long)]
+        task_id: Option<String>,
+
+        /// Repository root (default: current directory)
+        #[arg(long, default_value = ".")]
+        repo_root: PathBuf,
+    },
 }
 
 fn main() -> std::process::ExitCode {
@@ -293,6 +373,57 @@ fn main() -> std::process::ExitCode {
             task_id,
             path,
             quiet,
+        }
+        .run(),
+
+        Commands::FinalGate {
+            task_id,
+            decision,
+            commit_message,
+            notes,
+            repo_root,
+        } => commands::FinalGate {
+            repo_root,
+            task_id,
+            decision,
+            commit_message,
+            notes,
+        }
+        .run(),
+
+        Commands::Integrate {
+            task_id,
+            repo_root,
+        } => commands::Integrate {
+            repo_root,
+            task_id,
+        }
+        .run(),
+
+        Commands::GitGuard {
+            task_id,
+            repo_root,
+        } => commands::GitGuard {
+            repo_root,
+            task_id,
+        }
+        .run(),
+
+        Commands::ValidateSubagentStop {
+            task_id,
+            repo_root,
+        } => commands::ValidateSubagentStop {
+            repo_root,
+            task_id,
+        }
+        .run(),
+
+        Commands::PreToolGuard {
+            task_id,
+            repo_root,
+        } => commands::PreToolCheck {
+            repo_root,
+            task_id,
         }
         .run(),
     };

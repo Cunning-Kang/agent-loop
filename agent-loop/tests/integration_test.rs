@@ -27,7 +27,7 @@ fn test_agent_plan_demonstration_path() {
     let repo = create_test_repo();
     let repo_path = repo.path();
 
-    let plan_id = "plan-20260529-001";
+    let plan_id = "plan-20260530-001";
     let contract_id = "contract-001";
 
     // Create plan directory structure as /agent-plan would
@@ -39,7 +39,7 @@ fn test_agent_plan_demonstration_path() {
     let plan_json = serde_json::json!({
         "schema_version": "plan-v1",
         "plan_id": plan_id,
-        "created_at": "2026-05-29T12:00:00Z",
+        "created_at": "2026-05-30T12:00:00Z",
         "objective": "Test implementation of agent-loop CLI",
         "contracts": [
             {
@@ -138,7 +138,7 @@ fn test_agent_plan_demonstration_path() {
     // Verify status.json was created
     let status_path = repo_path
         .join(".agent-runs/tasks")
-        .join("task-20260529-001")
+        .join("task-20260530-001")
         .join("status.json");
     assert!(status_path.exists(), "status.json should be created");
 
@@ -146,7 +146,7 @@ fn test_agent_plan_demonstration_path() {
     let status_content = fs::read_to_string(&status_path).unwrap();
     let status: serde_json::Value = serde_json::from_str(&status_content).unwrap();
     assert_eq!(status["status"], "active");
-    assert_eq!(status["task_id"], "task-20260529-001");
+    assert_eq!(status["task_id"], "task-20260530-001");
     assert_eq!(status["plan_id"], plan_id);
     assert_eq!(status["contract_id"], contract_id);
 
@@ -159,7 +159,7 @@ fn test_agent_plan_demonstration_path() {
 
     cmd.assert()
         .success()
-        .stdout(predicate::str::contains("task-20260529-001"));
+        .stdout(predicate::str::contains("task-20260530-001"));
 
     println!("All /agent-plan demonstration tests passed!");
 }
@@ -167,7 +167,7 @@ fn test_agent_plan_demonstration_path() {
 #[test]
 fn test_id_formats() {
     // Test plan-YYYYMMDD-NNN format
-    let plan_id = "plan-20260529-001";
+    let plan_id = "plan-20260530-001";
     assert!(regex::Regex::new(r"^plan-\d{8}-\d{3}$")
         .unwrap()
         .is_match(plan_id));
@@ -179,7 +179,7 @@ fn test_id_formats() {
         .is_match(contract_id));
 
     // Test task-YYYYMMDD-NNN format
-    let task_id = "task-20260529-001";
+    let task_id = "task-20260530-001";
     assert!(regex::Regex::new(r"^task-\d{8}-\d{3}$")
         .unwrap()
         .is_match(task_id));
@@ -190,8 +190,8 @@ fn test_blocked_requires_reason_and_details() {
     let repo = create_test_repo();
     let repo_path = repo.path();
 
-    let task_id = "task-20260529-001";
-    let plan_id = "plan-20260529-001";
+    let task_id = "task-20260530-001";
+    let plan_id = "plan-20260530-001";
 
     // Create task directory
     let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
@@ -205,8 +205,8 @@ fn test_blocked_requires_reason_and_details() {
         "contract_id": "contract-001",
         "status": "blocked",
         // Missing: blocked_reason and details
-        "created_at": "2026-05-29T12:00:00Z",
-        "updated_at": "2026-05-29T12:00:00Z"
+        "created_at": "2026-05-30T12:00:00Z",
+        "updated_at": "2026-05-30T12:00:00Z"
     });
     fs::write(
         task_dir.join("status.json"),
@@ -231,8 +231,8 @@ fn test_valid_blocked_status() {
     let repo = create_test_repo();
     let repo_path = repo.path();
 
-    let task_id = "task-20260529-001";
-    let plan_id = "plan-20260529-001";
+    let task_id = "task-20260530-001";
+    let plan_id = "plan-20260530-001";
 
     // Create task directory
     let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
@@ -247,8 +247,8 @@ fn test_valid_blocked_status() {
         "status": "blocked",
         "blocked_reason": "needs_user_decision",
         "details": "Test depends on upstream API change",
-        "created_at": "2026-05-29T12:00:00Z",
-        "updated_at": "2026-05-29T12:00:00Z"
+        "created_at": "2026-05-30T12:00:00Z",
+        "updated_at": "2026-05-30T12:00:00Z"
     });
     fs::write(
         task_dir.join("status.json"),
@@ -284,7 +284,7 @@ fn create_test_repo_with_approved_contract() -> (tempfile::TempDir, String, Stri
  fs::create_dir(&git).unwrap();
  fs::write(git.join("config"), "[core]\n").unwrap();
 
- let plan_id = "plan-20260529-001".to_string();
+ let plan_id = "plan-20260530-001".to_string();
  let contract_id = "contract-001".to_string();
 
  // Create plan directory + contract (approved, eligible).
@@ -297,7 +297,7 @@ fn create_test_repo_with_approved_contract() -> (tempfile::TempDir, String, Stri
  let plan_json = serde_json::json!({
  "schema_version": "plan-v1",
  "plan_id": plan_id,
- "created_at": "2026-05-29T12:00:00Z",
+ "created_at": "2026-05-30T12:00:00Z",
  "objective": "Demonstrate /agent-run with mock backend",
  "contracts": [
  { "contract_id": contract_id, "status": "approved" }
@@ -339,7 +339,7 @@ fn create_test_repo_with_approved_contract() -> (tempfile::TempDir, String, Stri
  "discovery_usage": { "used": false, "reason": "demo" },
  "approval": {
  "approved_by": "opus-main",
- "approved_at": "2026-05-29T12:00:00Z",
+ "approved_at": "2026-05-30T12:00:00Z",
  "notes": "approved for demonstration"
  }
  });
@@ -408,13 +408,13 @@ fn test_agent_run_demonstration_path() {
  .arg("--contract-id")
  .arg(&contract_id)
  .arg("--task-id")
- .arg("task-20260529-001")
+ .arg("task-20260530-001")
  .arg("--repo-root")
  .arg(repo_path)
  .current_dir(repo_path);
  cmd.assert().success();
 
- let task_id = "task-20260529-001";
+ let task_id = "task-20260530-001";
 
  // Step3: create isolated worktree (deterministic path step; adapter
  // would normally shell out to `git worktree add`).
@@ -587,7 +587,7 @@ fn test_collect_evidence_writes_exactly_seven_artifacts() {
  .unwrap()
  .arg("init-run")
  .arg("--plan-id")
- .arg("plan-20260529-001")
+ .arg("plan-20260530-001")
  .arg("--contract-id")
  .arg("contract-001")
  .arg("--task-id")
@@ -649,7 +649,7 @@ fn test_validate_evidence_rejects_missing_artifacts() {
  .unwrap()
  .arg("init-run")
  .arg("--plan-id")
- .arg("plan-20260529-001")
+ .arg("plan-20260530-001")
  .arg("--contract-id")
  .arg("contract-001")
  .arg("--task-id")
@@ -682,7 +682,7 @@ fn test_collect_evidence_deterministic_idempotent() {
  .unwrap()
  .arg("init-run")
  .arg("--plan-id")
- .arg("plan-20260529-001")
+ .arg("plan-20260530-001")
  .arg("--contract-id")
  .arg("contract-001")
  .arg("--task-id")
@@ -817,7 +817,7 @@ fn make_valid_sonnet_review(task_id: &str, merge: &str) -> serde_json::Value {
 fn test_validate_sonnet_review_fails_missing_file() {
     let repo = create_test_repo();
     let repo_path = repo.path();
-    let task_id = "task-20260529-001";
+    let task_id = "task-20260530-001";
     let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
     fs::create_dir_all(&task_dir).unwrap();
 
@@ -833,7 +833,7 @@ fn test_validate_sonnet_review_fails_missing_file() {
 fn test_validate_sonnet_review_accepts_valid_five_gate() {
     let repo = create_test_repo();
     let repo_path = repo.path();
-    let task_id = "task-20260529-001";
+    let task_id = "task-20260530-001";
     let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
     fs::create_dir_all(&task_dir).unwrap();
 
@@ -852,7 +852,7 @@ fn test_validate_sonnet_review_accepts_valid_five_gate() {
 fn test_validate_sonnet_review_rejects_wrong_gate_order() {
     let repo = create_test_repo();
     let repo_path = repo.path();
-    let task_id = "task-20260529-001";
+    let task_id = "task-20260530-001";
     let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
     fs::create_dir_all(&task_dir).unwrap();
 
@@ -884,7 +884,7 @@ fn test_validate_sonnet_review_rejects_wrong_gate_order() {
 fn test_validate_sonnet_review_rejects_missing_gates() {
     let repo = create_test_repo();
     let repo_path = repo.path();
-    let task_id = "task-20260529-001";
+    let task_id = "task-20260530-001";
     let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
     fs::create_dir_all(&task_dir).unwrap();
 
@@ -912,7 +912,7 @@ fn test_validate_sonnet_review_rejects_missing_gates() {
 fn test_validate_sonnet_review_rejects_invalid_schema_version() {
     let repo = create_test_repo();
     let repo_path = repo.path();
-    let task_id = "task-20260529-001";
+    let task_id = "task-20260530-001";
     let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
     fs::create_dir_all(&task_dir).unwrap();
 
@@ -942,7 +942,7 @@ fn test_validate_sonnet_review_rejects_invalid_schema_version() {
 fn test_validate_sonnet_review_accepts_merge_reject() {
     let repo = create_test_repo();
     let repo_path = repo.path();
-    let task_id = "task-20260529-001";
+    let task_id = "task-20260530-001";
     let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
     fs::create_dir_all(&task_dir).unwrap();
 
@@ -961,7 +961,7 @@ fn test_validate_sonnet_review_accepts_merge_reject() {
 fn test_validate_sonnet_review_accepts_path_argument() {
     let repo = create_test_repo();
     let repo_path = repo.path();
-    let task_id = "task-20260529-001";
+    let task_id = "task-20260530-001";
     let task_dir = repo_path.join(".agent-runs/tasks").join(task_id);
     fs::create_dir_all(&task_dir).unwrap();
 
@@ -988,7 +988,7 @@ fn test_agent_review_end_to_end_produces_valid_review() {
     let task_id = "task-20260529-010";
 
     Command::cargo_bin("agent_loop").unwrap()
-        .arg("init-run").arg("--plan-id").arg("plan-20260529-001")
+        .arg("init-run").arg("--plan-id").arg("plan-20260530-001")
         .arg("--contract-id").arg("contract-001").arg("--task-id").arg(task_id)
         .arg("--repo-root").arg(repo_path).current_dir(repo_path)
         .assert().success();
@@ -1009,3 +1009,1098 @@ fn test_agent_review_end_to_end_produces_valid_review() {
     assert!(parsed["gates"].is_array());
     assert_eq!(parsed["gates"].as_array().unwrap().len(), 5);
 }
+
+// ============================================================================
+// /agent-final-gate demonstration path
+// ============================================================================
+
+/// Helper: create a minimal test repo with task artifacts for final-gate.
+fn setup_final_gate_repo() -> (tempfile::TempDir, String) {
+    let temp = tempfile::TempDir::new().unwrap();
+    let repo = temp.path().to_path_buf();
+    let git = repo.join(".git");
+    // Create minimal valid git repo so git commands work.
+    std::fs::create_dir_all(git.join("refs/heads")).unwrap();
+    std::fs::create_dir_all(git.join("objects/info")).unwrap();
+    std::fs::create_dir_all(git.join("objects/pack")).unwrap();
+    std::fs::write(git.join("config"), "[core]\n").unwrap();
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/master\n").unwrap();
+    std::fs::write(git.join("packed-refs"), "").unwrap();
+    // Add .gitignore to exclude agent artifacts from tracking.
+    std::fs::write(repo.join(".gitignore"), ".agent-runs/\n.worktrees/\n").unwrap();
+    // Configure git user identity.
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.email", "test@test.com"])
+        .current_dir(&repo)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(&repo)
+        .output();
+    // Add .gitignore to index so worktree is clean for PreToolCheck.
+    let _ = std::process::Command::new("git")
+        .args(["add", ".gitignore"])
+        .current_dir(&repo)
+        .output();
+    let _ = std::process::Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&repo)
+        .output();
+
+
+    let plan_id = "plan-20260530-001".to_string();
+    let task_id = "task-20260530-001".to_string();
+
+    // Create plan + contract.
+    let plan_dir = repo.join(".agent-runs/plans").join(&plan_id);
+    let contracts_dir = plan_dir.join("contracts");
+    std::fs::create_dir_all(&contracts_dir).unwrap();
+
+    let plan_json = serde_json::json!({
+        "schema_version": "plan-v1",
+        "plan_id": plan_id,
+        "created_at": "2026-05-30T12:00:00Z",
+        "objective": "Test final gate",
+        "contracts": [{ "contract_id": "contract-001", "status": "approved" }]
+    });
+    std::fs::write(
+        plan_dir.join("plan.json"),
+        serde_json::to_string_pretty(&plan_json).unwrap(),
+    )
+    .unwrap();
+
+    let contract_json = serde_json::json!({
+        "schema_version": "task-contract-v1",
+        "plan_id": plan_id,
+        "contract_id": "contract-001",
+        "status": "approved",
+        "objective": "Test",
+        "risk_class": "low",
+        "execution_eligibility": { "allowed": true, "blocked_reason": null, "details": null },
+        "scope": [],
+        "acceptance_criteria": [],
+        "required_verification": ["cargo test"],
+        "optional_verification": [],
+        "mutation_policy": { "allowed_patterns": [], "forbidden_patterns": [] },
+        "test_policy": { "allowed": [], "forbidden": [] },
+        "repair_budget": 0,
+        "discovery_usage": { "used": false, "reason": "test" }
+    });
+    std::fs::write(
+        contracts_dir.join("contract-001.json"),
+        serde_json::to_string_pretty(&contract_json).unwrap(),
+    )
+    .unwrap();
+
+    // Init run.
+    Command::cargo_bin("agent_loop").unwrap()
+        .arg("init-run")
+        .arg("--plan-id").arg(&plan_id)
+        .arg("--contract-id").arg("contract-001")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(&repo)
+        .current_dir(&repo)
+        .assert().success();
+
+    // Create machine_gate.json.
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+    let machine_gate = serde_json::json!({
+        "schema_version": "machine-gate-v1",
+        "task_id": task_id,
+        "passed": true,
+        "checks": [
+            { "name": "artifact_checks", "passed": true }
+        ]
+    });
+    std::fs::write(
+        task_dir.join("machine_gate.json"),
+        serde_json::to_string_pretty(&machine_gate).unwrap(),
+    )
+    .unwrap();
+
+    // Create sonnet_review.json.
+    let review = make_valid_sonnet_review(&task_id, "approve");
+    std::fs::write(
+        task_dir.join("sonnet_review.json"),
+        serde_json::to_string_pretty(&review).unwrap(),
+    )
+    .unwrap();
+
+    // Create normalized/ with diff.patch.
+    let normalized_dir = task_dir.join("normalized");
+    std::fs::create_dir_all(&normalized_dir).unwrap();
+    std::fs::write(normalized_dir.join("diff.patch"), "--- a/x\n+++ b/x\n").unwrap();
+
+    (temp, task_id)
+}
+
+#[test]
+fn test_final_gate_writes_four_state_decision_merge() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("final-gate")
+        .arg("--task-id").arg(&task_id)
+        .arg("--decision").arg("merge")
+        .arg("--commit-message").arg("feat: test commit")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().success();
+
+    let gate_path = repo
+        .join(".agent-runs/tasks")
+        .join(&task_id)
+        .join("opus_final_gate.json");
+    assert!(gate_path.exists(), "opus_final_gate.json should be created");
+
+    let content = fs::read_to_string(&gate_path).unwrap();
+    let gate: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(gate["schema_version"], "opus-final-gate-v1");
+    assert_eq!(gate["decision"], "merge");
+    assert_eq!(gate["commit_message"], "feat: test commit");
+    assert_eq!(gate["task_id"], task_id);
+}
+
+#[test]
+fn test_final_gate_writes_decision_reject() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("final-gate")
+        .arg("--task-id").arg(&task_id)
+        .arg("--decision").arg("reject")
+        .arg("--commit-message").arg("unused")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().success();
+
+    let gate_path = repo
+        .join(".agent-runs/tasks")
+        .join(&task_id)
+        .join("opus_final_gate.json");
+    let content = fs::read_to_string(&gate_path).unwrap();
+    let gate: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(gate["decision"], "reject");
+    // reject has null commit_message
+    assert!(gate["commit_message"].is_null());
+}
+
+#[test]
+fn test_final_gate_writes_decision_request_repair() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("final-gate")
+        .arg("--task-id").arg(&task_id)
+        .arg("--decision").arg("request_repair")
+        .arg("--commit-message").arg("unused")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().success();
+
+    let gate_path = repo
+        .join(".agent-runs/tasks")
+        .join(&task_id)
+        .join("opus_final_gate.json");
+    let content = fs::read_to_string(&gate_path).unwrap();
+    let gate: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(gate["decision"], "request_repair");
+}
+
+#[test]
+fn test_final_gate_writes_decision_needs_user_decision() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("final-gate")
+        .arg("--task-id").arg(&task_id)
+        .arg("--decision").arg("needs_user_decision")
+        .arg("--commit-message").arg("unused")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().success();
+
+    let gate_path = repo
+        .join(".agent-runs/tasks")
+        .join(&task_id)
+        .join("opus_final_gate.json");
+    let content = fs::read_to_string(&gate_path).unwrap();
+    let gate: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(gate["decision"], "needs_user_decision");
+}
+
+#[test]
+fn test_final_gate_rejects_invalid_decision() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("final-gate")
+        .arg("--task-id").arg(&task_id)
+        .arg("--decision").arg("garbage")
+        .arg("--commit-message").arg("unused")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().failure();
+}
+
+#[test]
+fn test_final_gate_requires_sonnet_review() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    // Remove sonnet_review.json.
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+    std::fs::remove_file(task_dir.join("sonnet_review.json")).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("final-gate")
+        .arg("--task-id").arg(&task_id)
+        .arg("--decision").arg("merge")
+        .arg("--commit-message").arg("unused")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().failure();
+}
+
+#[test]
+fn test_final_gate_requires_machine_gate() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    // Remove machine_gate.json.
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+    std::fs::remove_file(task_dir.join("machine_gate.json")).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("final-gate")
+        .arg("--task-id").arg(&task_id)
+        .arg("--decision").arg("merge")
+        .arg("--commit-message").arg("unused")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().failure();
+}
+
+#[test]
+fn test_final_gate_requires_diff() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    // Remove diff.patch.
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+    std::fs::remove_file(task_dir.join("normalized/diff.patch")).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("final-gate")
+        .arg("--task-id").arg(&task_id)
+        .arg("--decision").arg("merge")
+        .arg("--commit-message").arg("unused")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().failure();
+}
+
+// ============================================================================
+// git-guard demonstration path
+// ============================================================================
+
+#[test]
+fn test_git_guard_allows_no_run() {
+    let repo = create_test_repo();
+    let repo_path = repo.path();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("git-guard")
+        .arg("--task-id").arg("task-20260530-999")
+        .arg("--repo-root").arg(repo_path)
+        .current_dir(repo_path);
+    cmd.assert().success()
+        .stdout(predicate::str::contains("allowed"))
+        .stdout(predicate::str::contains("no run detected"));
+}
+
+#[test]
+fn test_git_guard_blocks_active_run() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    // Active status is default after init-run.
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("git-guard")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().failure()
+        .stdout(predicate::str::contains("blocked"))
+        .stdout(predicate::str::contains("active_run"));
+}
+
+#[test]
+fn test_git_guard_allows_merge_with_preconditions() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    // Write final gate with merge.
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+    let gate = serde_json::json!({
+        "schema_version": "opus-final-gate-v1",
+        "task_id": task_id,
+        "decision": "merge",
+        "commit_message": "test",
+        "timestamp": "2026-05-30T12:00:00Z"
+    });
+    std::fs::write(
+        task_dir.join("opus_final_gate.json"),
+        serde_json::to_string_pretty(&gate).unwrap(),
+    )
+    .unwrap();
+
+    // Set status to committed (final gate completed).
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+    let status_path = task_dir.join("status.json");
+    let status: serde_json::Value = serde_json::from_str(&fs::read_to_string(&status_path).unwrap()).unwrap();
+    let mut committed_status = status.clone();
+    committed_status["status"] = serde_json::json!("committed");
+    std::fs::write(&status_path, serde_json::to_string_pretty(&committed_status).unwrap()).unwrap();
+
+    // Create initial commit so git status succeeds.
+    std::fs::write(repo.join("README"), "test").unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("git-guard")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().success()
+        .stdout(predicate::str::contains("allowed"));
+}
+
+#[test]
+fn test_git_guard_blocks_non_merge_decision() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+    let gate = serde_json::json!({
+        "schema_version": "opus-final-gate-v1",
+        "task_id": task_id,
+        "decision": "reject",
+        "commit_message": null,
+        "timestamp": "2026-05-30T12:00:00Z"
+    });
+    std::fs::write(
+        task_dir.join("opus_final_gate.json"),
+        serde_json::to_string_pretty(&gate).unwrap(),
+    )
+    .unwrap();
+
+    // Set status to committed.
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+    let status_path = task_dir.join("status.json");
+    let status: serde_json::Value = serde_json::from_str(&fs::read_to_string(&status_path).unwrap()).unwrap();
+    let mut committed_status = status.clone();
+    committed_status["status"] = serde_json::json!("committed");
+    std::fs::write(&status_path, serde_json::to_string_pretty(&committed_status).unwrap()).unwrap();
+
+    // Create initial commit so git status succeeds.
+    std::fs::write(repo.join("README"), "test").unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("git-guard")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().failure()
+        .stdout(predicate::str::contains("blocked"))
+        .stdout(predicate::str::contains("gate_rejected"));
+}
+
+#[test]
+fn test_git_guard_pending_no_final_gate() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    // Has status but no opus_final_gate.json.
+
+    // Active status -> blocked (not pending).
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("git-guard")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().failure()
+        .stdout(predicate::str::contains("blocked"))
+        .stdout(predicate::str::contains("active_run"));
+}
+
+// ============================================================================
+// validate-subagent-stop demonstration path
+// ============================================================================
+
+#[test]
+fn test_validate_subagent_stop_all_present() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+
+    // Write opus_final_gate.json.
+    let gate = serde_json::json!({
+        "schema_version": "opus-final-gate-v1",
+        "task_id": task_id,
+        "decision": "merge",
+        "commit_message": "test",
+        "timestamp": "2026-05-30T12:00:00Z"
+    });
+    std::fs::write(
+        task_dir.join("opus_final_gate.json"),
+        serde_json::to_string_pretty(&gate).unwrap(),
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("validate-subagent-stop")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().success()
+        .stdout(predicate::str::contains("All required SubagentStop artifacts present"));
+}
+
+#[test]
+fn test_validate_subagent_stop_missing_artifact() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    // Remove opus_final_gate.json.
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+    let _ = std::fs::remove_file(task_dir.join("opus_final_gate.json"));
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("validate-subagent-stop")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().failure()
+        .stderr(predicate::str::contains("opus_final_gate.json"));
+}
+
+// ============================================================================
+// PreToolUse guard tests
+// ============================================================================
+
+#[test]
+fn test_pre_tool_guard_allows_no_run() {
+    let temp = create_test_repo();
+    let repo = temp.path();
+
+    // No .agent-runs at all -> allowed.
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("pre-tool-guard")
+        .arg("--repo-root").arg(repo);
+    cmd.assert().success().stdout(predicate::str::contains("allowed"));
+}
+
+#[test]
+fn test_pre_tool_guard_blocks_active_run() {
+    let temp = create_test_repo();
+    let repo = temp.path();
+
+    let tasks_dir = repo.join(".agent-runs/tasks");
+    std::fs::create_dir_all(&tasks_dir).unwrap();
+    let task_dir = tasks_dir.join("task-20260530-001");
+    std::fs::create_dir_all(&task_dir).unwrap();
+
+    let status = serde_json::json!({
+        "schema_version": "status-v1",
+        "task_id": "task-20260530-001",
+        "plan_id": "plan-20260530-001",
+        "contract_id": "contract-001",
+        "status": "active",
+        "created_at": "2026-05-30T12:00:00Z",
+        "updated_at": "2026-05-30T12:00:00Z"
+    });
+    std::fs::write(task_dir.join("status.json"), serde_json::to_string_pretty(&status).unwrap()).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("pre-tool-guard")
+        .arg("--repo-root").arg(repo);
+    cmd.assert().failure().stderr(predicate::str::contains("blocked"));
+}
+
+#[test]
+fn test_pre_tool_guard_allows_merge_with_preconditions() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+
+    // Write all required preconditions: committed status, merge decision, passed machine gate.
+    let status = serde_json::json!({
+        "schema_version": "status-v1",
+        "task_id": task_id,
+        "plan_id": "plan-20260530-001",
+        "contract_id": "contract-001",
+        "status": "committed",
+        "created_at": "2026-05-30T12:00:00Z",
+        "updated_at": "2026-05-30T12:00:00Z"
+    });
+    std::fs::write(task_dir.join("status.json"), serde_json::to_string_pretty(&status).unwrap()).unwrap();
+
+    std::fs::write(
+        task_dir.join("opus_final_gate.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "opus-final-gate-v1",
+            "task_id": task_id,
+            "decision": "merge",
+            "commit_message": "feat: approved change",
+            "timestamp": "2026-05-30T12:00:00Z"
+        })).unwrap(),
+    ).unwrap();
+
+    std::fs::write(
+        task_dir.join("machine_gate.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "machine-gate-v1",
+            "passed": true,
+            "timestamp": "2026-05-30T12:00:00Z"
+        })).unwrap(),
+    ).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("pre-tool-guard")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo);
+    cmd.assert().success().stdout(predicate::str::contains("allowed"));
+}
+
+#[test]
+fn test_pre_tool_guard_blocks_non_merge_gate() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+
+    let status = serde_json::json!({
+        "schema_version": "status-v1",
+        "task_id": task_id,
+        "plan_id": "plan-20260530-001",
+        "contract_id": "contract-001",
+        "status": "committed",
+        "created_at": "2026-05-30T12:00:00Z",
+        "updated_at": "2026-05-30T12:00:00Z"
+    });
+    std::fs::write(task_dir.join("status.json"), serde_json::to_string_pretty(&status).unwrap()).unwrap();
+
+    std::fs::write(
+        task_dir.join("opus_final_gate.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "opus-final-gate-v1",
+            "task_id": task_id,
+            "decision": "reject",
+            "commit_message": null,
+            "timestamp": "2026-05-30T12:00:00Z"
+        })).unwrap(),
+    ).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("pre-tool-guard")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo);
+    cmd.assert().failure().stderr(predicate::str::contains("blocked"));
+}
+
+// Note: dirty worktree is not checked by PreToolCheck - worktree cleanliness
+// is verified by Integrate command, not by the PreToolUse guard.
+
+#[test]
+fn test_pre_tool_guard_pending_no_final_gate() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+
+    let status = serde_json::json!({
+        "schema_version": "status-v1",
+        "task_id": task_id,
+        "plan_id": "plan-20260530-001",
+        "contract_id": "contract-001",
+        "status": "committed",
+        "created_at": "2026-05-30T12:00:00Z",
+        "updated_at": "2026-05-30T12:00:00Z"
+    });
+    std::fs::write(task_dir.join("status.json"), serde_json::to_string_pretty(&status).unwrap()).unwrap();
+
+    // No opus_final_gate -> pending, not blocked.
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("pre-tool-guard")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo);
+    cmd.assert().success().stdout(predicate::str::contains("pending"));
+}
+
+#[test]
+fn test_pre_tool_guard_blocks_machine_gate_failed() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+
+    let status = serde_json::json!({
+        "schema_version": "status-v1",
+        "task_id": task_id,
+        "plan_id": "plan-20260530-001",
+        "contract_id": "contract-001",
+        "status": "committed",
+        "created_at": "2026-05-30T12:00:00Z",
+        "updated_at": "2026-05-30T12:00:00Z"
+    });
+    std::fs::write(task_dir.join("status.json"), serde_json::to_string_pretty(&status).unwrap()).unwrap();
+
+    std::fs::write(
+        task_dir.join("opus_final_gate.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "opus-final-gate-v1",
+            "task_id": task_id,
+            "decision": "merge",
+            "commit_message": "feat: test",
+            "timestamp": "2026-05-30T12:00:00Z"
+        })).unwrap(),
+    ).unwrap();
+
+    std::fs::write(
+        task_dir.join("machine_gate.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "machine-gate-v1",
+            "passed": false,
+            "timestamp": "2026-05-30T12:00:00Z"
+        })).unwrap(),
+    ).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("pre-tool-guard")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo);
+    cmd.assert().failure().stderr(predicate::str::contains("blocked"));
+}
+
+#[test]
+fn test_pre_tool_guard_blocks_missing_commit_message() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+
+    let status = serde_json::json!({
+        "schema_version": "status-v1",
+        "task_id": task_id,
+        "plan_id": "plan-20260530-001",
+        "contract_id": "contract-001",
+        "status": "committed",
+        "created_at": "2026-05-30T12:00:00Z",
+        "updated_at": "2026-05-30T12:00:00Z"
+    });
+    std::fs::write(task_dir.join("status.json"), serde_json::to_string_pretty(&status).unwrap()).unwrap();
+
+    std::fs::write(
+        task_dir.join("opus_final_gate.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "opus-final-gate-v1",
+            "task_id": task_id,
+            "decision": "merge",
+            "commit_message": null,
+            "timestamp": "2026-05-30T12:00:00Z"
+        })).unwrap(),
+    ).unwrap();
+
+    std::fs::write(
+        task_dir.join("machine_gate.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schema_version": "machine-gate-v1",
+            "passed": true,
+            "timestamp": "2026-05-30T12:00:00Z"
+        })).unwrap(),
+    ).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("pre-tool-guard")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo);
+    cmd.assert().failure().stderr(predicate::str::contains("blocked"));
+}
+
+
+// ============================================================================
+// /agent-integrate demonstration path
+// ============================================================================
+
+/// Helper: setup repo with clean main worktree and all integration preconditions.
+fn setup_integrate_repo() -> (tempfile::TempDir, String) {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+
+    // Write opus_final_gate with merge + commit message.
+    let gate = serde_json::json!({
+        "schema_version": "opus-final-gate-v1",
+        "task_id": task_id,
+        "decision": "merge",
+        "commit_message": "feat: integration test commit",
+        "timestamp": "2026-05-30T12:00:00Z"
+    });
+    std::fs::write(
+        task_dir.join("opus_final_gate.json"),
+        serde_json::to_string_pretty(&gate).unwrap(),
+    )
+    .unwrap();
+
+    // Write changed_files.json.
+    let normalized_dir = task_dir.join("normalized");
+    let changed = serde_json::json!({
+        "schema_version": "changed-files-v1",
+        "task_id": task_id,
+        "files": [{ "path": "src/feature.rs", "operation": "create" }]
+    });
+    std::fs::write(
+        normalized_dir.join("changed_files.json"),
+        serde_json::to_string_pretty(&changed).unwrap(),
+    )
+    .unwrap();
+
+    // Write verification.json.
+    let verification = serde_json::json!({
+        "schema_version": "verification-v1",
+        "task_id": task_id,
+        "results": [],
+        "all_required_passed": true
+    });
+    std::fs::write(
+        normalized_dir.join("verification.json"),
+        serde_json::to_string_pretty(&verification).unwrap(),
+    )
+    .unwrap();
+
+    // Create the target file in the worktree so git apply has something to apply to.
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/feature.rs"), "old\n").unwrap();
+
+    // Make initial commit.
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    (temp, task_id)
+}
+
+#[test]
+fn test_integrate_requires_final_gate_merge() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    // Write opus_final_gate with reject.
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+    let gate = serde_json::json!({
+        "schema_version": "opus-final-gate-v1",
+        "task_id": task_id,
+        "decision": "reject",
+        "commit_message": null,
+        "timestamp": "2026-05-30T12:00:00Z"
+    });
+    std::fs::write(
+        task_dir.join("opus_final_gate.json"),
+        serde_json::to_string_pretty(&gate).unwrap(),
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("integrate")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().failure()
+        .stderr(predicate::str::contains("must be 'merge'"));
+}
+
+#[test]
+fn test_integrate_requires_clean_worktree() {
+    let (temp, task_id) = setup_final_gate_repo();
+    let repo = temp.path();
+
+    // Write opus_final_gate with merge.
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+    let gate = serde_json::json!({
+        "schema_version": "opus-final-gate-v1",
+        "task_id": task_id,
+        "decision": "merge",
+        "commit_message": "test",
+        "timestamp": "2026-05-30T12:00:00Z"
+    });
+    std::fs::write(
+        task_dir.join("opus_final_gate.json"),
+        serde_json::to_string_pretty(&gate).unwrap(),
+    )
+    .unwrap();
+
+    // Stage everything and commit.
+    let add_out = std::process::Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    if !add_out.status.success() {
+        eprintln!("git add failed: {}", String::from_utf8_lossy(&add_out.stderr));
+    }
+    let commit_out = std::process::Command::new("git")
+        .args(["commit", "-m", "setup"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    if !commit_out.status.success() {
+        eprintln!("git commit failed: {}", String::from_utf8_lossy(&commit_out.stderr));
+    }
+
+    // Now add an uncommitted file.
+    std::fs::write(repo.join("uncommitted.txt"), "dirty").unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("integrate")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().failure()
+        .stderr(predicate::str::contains("not clean"));
+}
+
+#[test]
+fn test_integrate_stages_expected_files_only() {
+    let (temp, task_id) = setup_integrate_repo();
+    let repo = temp.path();
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+
+    // Update diff to modify the existing file.
+    let normalized_dir = task_dir.join("normalized");
+    let diff = "--- a/src/feature.rs\n+++ b/src/feature.rs\n@@ -1 +1 @@\n-old\n+new\n";
+    std::fs::write(normalized_dir.join("diff.patch"), diff).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("integrate")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().success();
+
+    // Verify integration_result.json was written.
+    let result_path = task_dir.join("integration_result.json");
+    assert!(result_path.exists(), "integration_result.json should exist");
+
+    let content = fs::read_to_string(&result_path).unwrap();
+    let result: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(result["schema_version"], "integration-result-v1");
+    assert_eq!(result["task_id"], task_id);
+    assert!(result["commit_hash"].as_str().unwrap().len() >= 7);
+    assert!(result["verification_passed"].as_bool().is_some());
+    assert!(result["worktree_removed"].as_bool().is_some());
+    assert_eq!(result["agent_runs_retained"], true);
+
+    // Verify worktree was removed.
+    let worktree = repo.join(".worktrees").join(&task_id);
+    assert!(!worktree.exists() || result["worktree_removed"] == true);
+}
+
+#[test]
+fn test_integrate_patch_conflict_blocks() {
+    // Test: patch conflict blocks integration.
+    let (temp, task_id) = setup_integrate_repo();
+    let repo = temp.path();
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+    let normalized_dir = task_dir.join("normalized");
+
+    // Write a patch that will fail apply --check (no matching context).
+    std::fs::write(
+        normalized_dir.join("diff.patch"),
+        "--- a/no-match\n+++ b/no-match\n@@ -1 +1 @@\n-old\n+new\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("integrate")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().failure();
+}
+
+#[test]
+fn test_integrate_no_auto_resolve() {
+    // Verify that git apply --check is used before apply.
+    // If conflict, no auto-resolve happens.
+    let (temp, task_id) = setup_integrate_repo();
+    let repo = temp.path();
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+    let normalized_dir = task_dir.join("normalized");
+
+    // Write a patch that will fail apply --check.
+    std::fs::write(
+        normalized_dir.join("diff.patch"),
+        "--- a/does-not-exist\n+++ b/does-not-exist\n@@ -0,0 +1 @@\n+conflict\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("agent_loop").unwrap();
+    cmd.arg("integrate")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd.assert().failure().stderr(predicate::str::contains("conflict").or(predicate::str::contains("commit")));
+
+    // Verify no commit was created.
+    let log_out = std::process::Command::new("git")
+        .args(["log", "--oneline"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&log_out.stdout);
+    assert!(
+        !log.contains("integration test commit"),
+        "no commit should be created on conflict"
+    );
+}
+
+#[test]
+fn test_final_gate_then_integrate_produces_local_commit() {
+    let (temp, task_id) = setup_integrate_repo();
+    let repo = temp.path();
+    let task_dir = repo.join(".agent-runs/tasks").join(&task_id);
+    let normalized_dir = task_dir.join("normalized");
+
+    // Create a target file and initial commit.
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("src/feature.rs"), "old\n").unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+
+    // Update diff.patch to modify the existing file.
+    std::fs::write(
+        normalized_dir.join("diff.patch"),
+        "--- a/src/feature.rs\n+++ b/src/feature.rs\n@@ -1 +1 @@\n-old\n+new\n",
+    )
+    .unwrap();
+
+    // Write changed_files.json.
+    let changed = serde_json::json!({
+        "schema_version": "changed-files-v1",
+        "task_id": task_id,
+        "files": [{ "path": "src/feature.rs", "operation": "modify" }]
+    });
+    std::fs::write(
+        normalized_dir.join("changed_files.json"),
+        serde_json::to_string_pretty(&changed).unwrap(),
+    )
+    .unwrap();
+
+    // Write verification.json.
+    let verification = serde_json::json!({
+        "schema_version": "verification-v1",
+        "task_id": task_id,
+        "results": [],
+        "all_required_passed": true
+    });
+    std::fs::write(
+        normalized_dir.join("verification.json"),
+        serde_json::to_string_pretty(&verification).unwrap(),
+    )
+    .unwrap();
+
+    // Step 1: /agent-final-gate.
+    let mut cmd1 = Command::cargo_bin("agent_loop").unwrap();
+    cmd1.arg("final-gate")
+        .arg("--task-id").arg(&task_id)
+        .arg("--decision").arg("merge")
+        .arg("--commit-message").arg("feat: end-to-end integration test")
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd1.assert().success();
+
+    // Verify opus_final_gate.json was written.
+    let gate_path = task_dir.join("opus_final_gate.json");
+    assert!(gate_path.exists());
+    let gate: serde_json::Value = serde_json::from_str(&fs::read_to_string(&gate_path).unwrap()).unwrap();
+    assert_eq!(gate["decision"], "merge");
+    assert_eq!(gate["commit_message"], "feat: end-to-end integration test");
+
+    // Step 2: /agent-integrate.
+    let mut cmd2 = Command::cargo_bin("agent_loop").unwrap();
+    cmd2.arg("integrate")
+        .arg("--task-id").arg(&task_id)
+        .arg("--repo-root").arg(repo)
+        .current_dir(repo);
+    cmd2.assert().success();
+
+    // Verify integration_result.json.
+    let result_path = task_dir.join("integration_result.json");
+    assert!(result_path.exists());
+    let result: serde_json::Value = serde_json::from_str(&fs::read_to_string(&result_path).unwrap()).unwrap();
+    assert!(result["commit_hash"].as_str().unwrap().len() >= 7, "commit_hash must be at least 7 chars (short SHA)");
+    assert_eq!(result["committed_files"].as_array().unwrap().len(), 1);
+    assert_eq!(result["verification_passed"].as_bool().unwrap(), true);
+    assert_eq!(result["worktree_removed"].as_bool().unwrap(), true);
+    assert_eq!(result["agent_runs_retained"].as_bool().unwrap(), true);
+
+    // Verify git log shows the commit.
+    let log_output = std::process::Command::new("git")
+        .args(["log", "--oneline"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&log_output.stdout);
+    assert!(log.contains("end-to-end integration test"));
+
+    // Verify .agent-runs/ evidence is retained.
+    assert!(gate_path.exists(), "opus_final_gate.json must be retained");
+    assert!(task_dir.join("machine_gate.json").exists());
+    assert!(task_dir.join("sonnet_review.json").exists());
+    assert!(task_dir.join("post_apply_verification.json").exists());
+}
+
+
+
